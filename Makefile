@@ -1,4 +1,4 @@
-.PHONY: clean
+.PHONY: clean test bench clean
 
 GO := $(shell which go)
 CMDS := $(shell ls cmd)
@@ -18,3 +18,6 @@ test:
 clean:
 	rm -rf bin; true
 	go clean -cache
+
+bench:
+	$(GO) test $(GOARGS) -bench . -benchtime 5s -benchmem -cpuprofile=cpu.out -memprofile=mem.out -trace=trace.out

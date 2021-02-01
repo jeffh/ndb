@@ -10,6 +10,17 @@ import (
 	"unicode"
 )
 
+type PredicateFunc func(r *Record) bool
+
+func FindKeyThen(r *Record, key string, pred func(fieldIndex int) bool) bool {
+	for i, size := 0, r.Len(); i < size; i++ {
+		if r.KeyAt(i) == key && pred(i) {
+			return true
+		}
+	}
+	return false
+}
+
 func OpenWithFS(ctx context.Context, fs FileSystem, filename string) (*DB, error) {
 	f, err := fs.Open(filename)
 	if err != nil {
@@ -51,6 +62,15 @@ type DB struct {
 	M        sync.RWMutex
 	Records  []Record
 	Children []*DB
+
+	QueryBuffer int // the internal buffer used for processing db files, defaults to 2
+}
+
+func (db *DB) getQueryBuffer() int {
+	if db.QueryBuffer <= 0 {
+		return 2
+	}
+	return db.QueryBuffer
 }
 
 type Record struct {
@@ -163,7 +183,7 @@ func (db *DB) Search(key, value string) Iterator {
 		return it
 	}
 
-	ch := make(chan Iterator, 4)
+	ch := make(chan Iterator, db.getQueryBuffer())
 	ch <- it
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -191,30 +211,64 @@ func (db *DB) Search(key, value string) Iterator {
 	return &lazyIterator{ctx: ctx, cancel: cancel, ch: ch}
 }
 
-// Find behaves like search, but returns a slice of all results that match the
+// SearchPredicate filters over the database satisfies the predicate
+// value. pred is assumed to be a pure function that is safe to run in
+// multiple goroutines.
+func (db *DB) SearchPredicate(pred PredicateFunc) Iterator {
+	it := makePredicateSearchIterator(context.Background(), db, true, pred)
+	if len(db.Children) == 0 {
+		return it
+	}
+
+	ch := make(chan Iterator, 4)
+	ch <- it
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	go func() {
+		db.M.RLock()
+		defer db.M.RUnlock()
+		for _, child := range db.Children {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				it := makePredicateSearchIterator(ctx, child, true, pred)
+				select {
+				case ch <- it:
+				case <-ctx.Done():
+					return
+				}
+			}
+		}
+
+		close(ch)
+	}()
+
+	return &lazyIterator{ctx: ctx, cancel: cancel, ch: ch}
+}
+
+// Find behaves like Search, but returns a slice of all results that match the
 // given key value pair.
 func (db *DB) Find(key, value string) []Record {
-	var out []Record
-	it := db.Search(key, value)
-	defer it.Close()
-	for it.Next() {
-		out = append(out, *it.Record())
-	}
-	if it.Err() != nil {
-		return nil
-	}
-	return out
+	return toSlice(db.Search(key, value))
+}
+
+// FindPredicate behaves like SearchPredicate, but returns a slice of all
+// results that match the given key and predicate.
+func (db *DB) FindPredicate(pred PredicateFunc) []Record {
+	return toSlice(db.SearchPredicate(pred))
 }
 
 // FindFirst returns the first record that matches the given key value pair.
 func (db *DB) FindFirst(key, value string) (Record, bool) {
-	it := db.Search(key, value)
-	defer it.Close()
-	if it.Next() {
-		return *it.Record(), true
-	} else {
-		return Record{}, false
-	}
+	return first(db.Search(key, value))
+}
+
+// FindFirstPredicate behaves like SearchPredicate, but returns a slice of all
+// results that match the given key and predicate.
+func (db *DB) FindFirstPredicate(pred PredicateFunc) (Record, bool) {
+	return first(db.SearchPredicate(pred))
 }
 
 func parseRecords(raw, filename string) ([]Record, error) {
@@ -567,4 +621,27 @@ func (a Record) Equal(b Record) bool { return reflect.DeepEqual(a.Map(), b.Map()
 
 func valueNeedsQuoting(x string) bool {
 	return strings.ContainsAny(x, "\t\n\v\f\r =\"")
+}
+
+//////////////////////////////////////
+
+func first(it Iterator) (Record, bool) {
+	defer it.Close()
+	if it.Next() {
+		return *it.Record(), true
+	} else {
+		return Record{}, false
+	}
+}
+
+func toSlice(it Iterator) []Record {
+	var out []Record
+	defer it.Close()
+	for it.Next() {
+		out = append(out, *it.Record())
+	}
+	if it.Err() != nil {
+		return nil
+	}
+	return out
 }

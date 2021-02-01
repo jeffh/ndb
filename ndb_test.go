@@ -2,6 +2,10 @@ package ndb
 
 import (
 	"context"
+	"fmt"
+	"math/rand"
+	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -519,5 +523,183 @@ func TestEdgeCase_UnclosedQuotedValueIsAnError(t *testing.T) {
 	_, err = runParse(`f=1 apple="sauce`)
 	if !IsErrCode(err, ErrCodeValueNotClosed) {
 		t.Fatalf("Expected error code ErrCodeValueNotClosed, got %s", err)
+	}
+}
+
+func TestSearchingViaPredicate(t *testing.T) {
+	{
+		db, err := runParse(`
+person given_name=Jeff family_name=Ref
+person given_name=John family_name=Doe
+person given_name=Abraham family_name=Lincoln
+`)
+		if err != nil {
+			t.Fatalf("Failed to parse: %s", err)
+		}
+
+		if db.Len() != 3 {
+			t.Fatalf("Expected num tuples to be 3, got: %v", db.Len())
+		}
+
+		actual, ok := db.FindFirstPredicate(func(r *Record) bool {
+			for i, size := 0, r.Len(); i < size; i++ {
+				if r.KeyAt(i) == "given_name" && r.ValueAt(i) == "Abraham" {
+					return true
+				}
+			}
+			return false
+		})
+		if !ok {
+			t.Fatalf("Failed to find a=: %#v", db.Records)
+		}
+
+		expected := MakeRecord("person", "", "given_name", "Abraham", "family_name", "Lincoln")
+		if !expected.Equal(actual) {
+			t.Fatalf("Expected %s, got %s: %#v", expected.String(), actual.String(), db)
+		}
+	}
+}
+
+func TestSearchViaKeyValueInMultipleDBs(t *testing.T) {
+	const numDBs = 4
+	const max = 100000
+
+	fs := &SimulatedFileSystem{
+		Files: map[string]string{},
+	}
+
+	for j := 0; j < numDBs; j++ {
+		var raw []string
+		for i := 0; i < max; i++ {
+			raw = append(raw, fmt.Sprintf("item index=%d hex=%x db=%d", i, i, j))
+		}
+		fs.Files[fmt.Sprintf("%d.db", j)] = strings.Join(raw, "\n")
+	}
+	{
+		var raw []string
+		raw = append(raw, "database")
+		for j := 0; j < numDBs; j++ {
+			raw = append(raw, fmt.Sprintf("file=%d.db", j))
+		}
+		fs.Files["main.db"] = strings.Join(raw, " ")
+	}
+
+	ctx := context.Background()
+
+	db, err := OpenWithFS(ctx, fs, "main.db")
+	if err != nil {
+		t.Fatalf("Failed to parse DB: %s", err)
+	}
+
+	for n := 0; n < 1; n++ {
+		i := rand.Intn(max)
+		nstr := strconv.Itoa(i)
+		res := db.Find("index", nstr)
+
+		if len(res) != numDBs {
+			t.Fatalf("Expected %d, got %v", numDBs, len(res))
+		}
+	}
+}
+
+func BenchmarkSearchViaKeyValue(b *testing.B) {
+	var raw []string
+
+	const max = 100000
+
+	for i := 0; i < max; i++ {
+		raw = append(raw, fmt.Sprintf("item index=%d hex=%x", i, i))
+	}
+
+	db, err := runParse(strings.Join(raw, "\n"))
+	if err != nil {
+		b.Fatalf("Failed to parse DB: %s", err)
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for n := 0; n < b.N; n++ {
+		i := rand.Intn(max)
+		nstr := strconv.Itoa(i)
+		res := db.Find("index", nstr)
+
+		if len(res) != 1 {
+			b.Fatalf("Expected 1, got %v", len(res))
+		}
+	}
+}
+
+func BenchmarkSearchViaKeyValueInMultipleDBs(b *testing.B) {
+	const numDBs = 8
+	const max = 100000
+
+	fs := &SimulatedFileSystem{
+		Files: map[string]string{},
+	}
+
+	for j := 0; j < numDBs; j++ {
+		var raw []string
+		for i := 0; i < max; i++ {
+			raw = append(raw, fmt.Sprintf("item index=%d hex=%x", i, i))
+		}
+		fs.Files[fmt.Sprintf("%d.db", j)] = strings.Join(raw, "\n")
+	}
+	{
+		var raw []string
+		raw = append(raw, "database")
+		for j := 0; j < numDBs; j++ {
+			raw = append(raw, fmt.Sprintf("file=%d.db", j))
+		}
+		fs.Files["main.db"] = strings.Join(raw, " ")
+	}
+
+	ctx := context.Background()
+
+	db, err := OpenWithFS(ctx, fs, "main.db")
+	if err != nil {
+		b.Fatalf("Failed to parse DB: %s", err)
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for n := 0; n < b.N; n++ {
+		i := rand.Intn(max)
+		nstr := strconv.Itoa(i)
+		res := db.Find("index", nstr)
+
+		if len(res) != numDBs {
+			b.Fatalf("Expected %d, got %v", numDBs, len(res))
+		}
+	}
+}
+
+func BenchmarkSearchViaPredicate(b *testing.B) {
+	var raw []string
+
+	const max = 100000
+
+	for i := 0; i < max; i++ {
+		raw = append(raw, fmt.Sprintf("item index=%d hex=%x", i, i))
+	}
+
+	db, err := runParse(strings.Join(raw, "\n"))
+	if err != nil {
+		b.Fatalf("Failed to parse DB: %s", err)
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for n := 0; n < b.N; n++ {
+		i := rand.Intn(max)
+		nstr := strconv.Itoa(i)
+		res := db.FindPredicate(func(r *Record) bool {
+			return FindKeyThen(r, "index", func(i int) bool {
+				return r.ValueAt(i) == nstr
+			})
+		})
+
+		if len(res) != 1 {
+			b.Fatalf("Expected 1, got %v", len(res))
+		}
 	}
 }

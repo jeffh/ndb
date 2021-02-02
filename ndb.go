@@ -350,11 +350,13 @@ func parseRecords(raw, filename string) ([]Record, error) {
 					}
 				}
 				if numEscapes%2 == 0 {
-					key := raw[startIndex+1 : i]
+					key := strings.ReplaceAll(raw[startIndex+1:i], "\\\\", "\\")
 					if len(key) > 0 {
 						currTuple.Key = key
 						parsingState = parsingEqual
 						startIndex = i + 1
+					} else {
+						return nil, mkE(ErrCodeKeyCannotBeEmpty, line, col, filename, "Keys cannot be empty.")
 					}
 				}
 			}
@@ -364,7 +366,10 @@ func parseRecords(raw, filename string) ([]Record, error) {
 					return nil, mkE(ErrCodeEqualsCannotBeValue, line, col, filename, "'=' is an invalid value. Please surround it in double quotes if you want to have it as a value.")
 				}
 			} else if unicode.IsSpace(r) {
-				return nil, mkE(ErrCodeUnexpectedWhitespace, line, col, filename, fmt.Sprintf("equals character between the key and value must must not have whitespace around it (key: %#v).", currTuple.Key))
+				record.Add(currTuple)
+				currTuple = Tuple{}
+				parsingState = parsingStart
+				startIndex = i + 1
 			} else {
 				startIndex = i
 				if r == '"' {

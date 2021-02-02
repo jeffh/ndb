@@ -5,19 +5,18 @@ import "fmt"
 type ErrCode int
 
 const (
-	ErrCodeUnexpectedWhitespace ErrCode = iota + 1
-	ErrCodeEqualsCannotBeKey
+	ErrCodeEqualsCannotBeKey ErrCode = iota + 1
 	ErrCodeEqualsCannotBeValue
 	ErrCodeKeyNotClosed
+	ErrCodeKeyCannotBeEmpty
 	ErrCodeValueNotClosed
 )
 
 var codeMap = map[ErrCode]string{
-	ErrCodeUnexpectedWhitespace: "unexpected-whitespace",
-	ErrCodeEqualsCannotBeKey:    "equals-cannot-be-key",
-	ErrCodeEqualsCannotBeValue:  "equals-cannot-be-value",
-	ErrCodeKeyNotClosed:         "key-not-closed",
-	ErrCodeValueNotClosed:       "value-not-closed",
+	ErrCodeEqualsCannotBeKey:   "equals-cannot-be-key",
+	ErrCodeEqualsCannotBeValue: "equals-cannot-be-value",
+	ErrCodeKeyNotClosed:        "key-not-closed",
+	ErrCodeValueNotClosed:      "value-not-closed",
 }
 
 func mkE(c ErrCode, line, col int, filename, reason string) *Error {

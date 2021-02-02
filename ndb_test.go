@@ -33,7 +33,7 @@ func TestOpeningMultipleFileDatabase(t *testing.T) {
 	t.Run("it opens nested children", func(t *testing.T) {
 		fs := &SimulatedFileSystem{
 			Files: map[string]string{
-				"main.db": "database file=child.db",
+				"main.db": "database= file=child.db",
 				"child.db": `database file=grandchild.db
 		a=1 sauce=yes`,
 				"grandchild.db": "a=4 sauce=no",
@@ -378,6 +378,13 @@ d=3`)
 	expected := MakeRecord("a", "2", "b", "4")
 	if !expected.Equal(actual) {
 		t.Fatalf("Expected %s, got %s: %#v", expected.String(), actual.String(), db)
+	}
+}
+
+func TestEdgeCase_ParseEmptyKeyIsAnError(t *testing.T) {
+	_, err := runParse(`""=1`)
+	if !IsErrCode(err, ErrCodeKeyCannotBeEmpty) {
+		t.Fatalf("Failed to parse: %s", err)
 	}
 }
 

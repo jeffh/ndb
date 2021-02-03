@@ -706,10 +706,6 @@ func (a Record) Map() map[string][]string {
 // TODO: optimize??
 func (a Record) Equal(b Record) bool { return reflect.DeepEqual(a.Map(), b.Map()) }
 
-func valueNeedsQuoting(x string) bool {
-	return len(x) == 0 || strings.ContainsAny(x, "\t\n\v\f\r =\"")
-}
-
 var escaper *strings.Replacer
 
 func init() {
@@ -720,7 +716,7 @@ func init() {
 }
 
 func quoteIfNeeded(x string) string {
-	if valueNeedsQuoting(x) {
+	if len(x) == 0 || strings.ContainsAny(x, "\t\n\v\f\r =\"") {
 		var buf bytes.Buffer
 		buf.Write([]byte("\""))
 		escaper.WriteString(&buf, x)

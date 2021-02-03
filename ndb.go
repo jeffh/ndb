@@ -62,15 +62,6 @@ type DB struct {
 	M        sync.RWMutex
 	Records  []Record
 	Children []*DB
-
-	QueryBuffer int // the internal buffer used for processing db files, defaults to 2
-}
-
-func (db *DB) getQueryBuffer() int {
-	if db.QueryBuffer <= 0 {
-		return 2
-	}
-	return db.QueryBuffer
 }
 
 type Record struct {
@@ -183,7 +174,7 @@ func (db *DB) Search(key, value string) Iterator {
 		return it
 	}
 
-	ch := make(chan Iterator, db.getQueryBuffer())
+	ch := make(chan Iterator, 1)
 	ch <- it
 
 	ctx, cancel := context.WithCancel(context.Background())

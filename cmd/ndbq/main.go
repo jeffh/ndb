@@ -30,7 +30,7 @@ func main() {
 		if flag.NArg() > 2 {
 			value = flag.Arg(2)
 		}
-		db, err := ndb.Open(ctx, filename)
+		db, err := ndb.Read(ctx, filename)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Failed to open: %s", err)
 			os.Exit(2)
@@ -43,7 +43,7 @@ func main() {
 			fmt.Printf(" - %s\n", r.String())
 		}
 	} else {
-		db, err := ndb.Open(ctx, filename)
+		db, err := ndb.Read(ctx, filename)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Failed to open: %s", err)
 			os.Exit(2)

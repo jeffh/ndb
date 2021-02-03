@@ -16,7 +16,7 @@ func TestWritingSingleRecord(t *testing.T) {
 	}).WithFilename("main.db")
 
 	ctx := context.Background()
-	if err := db.Save(ctx, fs); err != nil {
+	if err := db.SaveWithFS(ctx, fs); err != nil {
 		t.Fatalf("Failed to save: %s", err)
 	}
 
@@ -35,7 +35,7 @@ func TestWritingTwoRecords(t *testing.T) {
 	}).WithFilename("main.db")
 
 	ctx := context.Background()
-	if err := db.Save(ctx, fs); err != nil {
+	if err := db.SaveWithFS(ctx, fs); err != nil {
 		t.Fatalf("Failed to save: %s", err)
 	}
 
@@ -54,7 +54,7 @@ func TestWritingRecordsWithRepeatedKeys(t *testing.T) {
 	}).WithFilename("main.db")
 
 	ctx := context.Background()
-	if err := db.Save(ctx, fs); err != nil {
+	if err := db.SaveWithFS(ctx, fs); err != nil {
 		t.Fatalf("Failed to save: %s", err)
 	}
 
@@ -79,7 +79,7 @@ func TestWritingRecordsWithSubdatabases(t *testing.T) {
 	)
 
 	ctx := context.Background()
-	if err := db.Save(ctx, fs); err != nil {
+	if err := db.SaveWithFS(ctx, fs); err != nil {
 		t.Fatalf("Failed to save: %s", err)
 	}
 
@@ -122,12 +122,12 @@ func TestWritingAndReading(t *testing.T) {
 
 			record := MakeRecordFromMap(m)
 			expectedDB := MakeDB([]Record{record}).WithFilename("main.db")
-			if err := expectedDB.Save(ctx, fs); err != nil {
+			if err := expectedDB.SaveWithFS(ctx, fs); err != nil {
 				// t.Fatalf("Failed to save: %s", err)
 				return false
 			}
 
-			actualDB, err := OpenWithFS(ctx, fs, "main.db")
+			actualDB, err := ReadFS(ctx, fs, "main.db")
 			if err != nil {
 				// t.Fatalf("Failed to read: %s:\n%#v\n", err, fs.Files["main.db"])
 				return false

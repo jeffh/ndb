@@ -25,7 +25,7 @@ func FindKeyThen(r *Record, key string, pred func(fieldIndex int) bool) bool {
 	return false
 }
 
-func OpenWithFS(ctx context.Context, fs FileSystem, filename string) (*DB, error) {
+func ReadFS(ctx context.Context, fs FileSystem, filename string) (*DB, error) {
 	f, err := fs.Open(filename)
 	if err != nil {
 		return nil, err
@@ -46,21 +46,21 @@ func OpenWithFS(ctx context.Context, fs FileSystem, filename string) (*DB, error
 	return db, nil
 }
 
-func Open(ctx context.Context, filename string) (*DB, error) {
-	return OpenWithFS(ctx, DefaultFileSystem, filename)
+func Read(ctx context.Context, filename string) (*DB, error) {
+	return ReadFS(ctx, DefaultFileSystem, filename)
 }
 
-// Parse returns a DB from parsing a raw string
-func Parse(raw, filename string) (*DB, error) {
+// ParseString returns a DB from parsing a raw string
+func ParseString(raw, filename string) (*DB, error) {
 	recs, err := parseRecords(raw, filename)
 	if err != nil {
 		return nil, err
 	}
-	db := &DB{Records: recs}
+	db := &DB{Records: recs, Filename: filename}
 	return db, nil
 }
 
-func ParseBytes(raw []byte, filename string) (*DB, error) { return Parse(string(raw), filename) }
+func ParseBytes(raw []byte, filename string) (*DB, error) { return ParseString(string(raw), filename) }
 
 type DB struct {
 	Filename string
@@ -113,7 +113,7 @@ func (db *DB) openChildren(ctx context.Context, fs FileSystem, seen map[string]s
 			if _, ok := seen[file]; !ok {
 				seen[file] = struct{}{}
 				go func(i int, file string) {
-					d, err := OpenWithFS(subctx, fs, file)
+					d, err := ReadFS(subctx, fs, file)
 					out := result{
 						i:   i,
 						db:  d,
@@ -163,7 +163,12 @@ func (db *DB) WithChildren(children ...*DB) *DB {
 	return db
 }
 
-func (db *DB) Save(ctx context.Context, fs FileSystem) error {
+func (db *DB) Save(ctx context.Context) error { return db.SaveWithFS(ctx, nil) }
+
+func (db *DB) SaveWithFS(ctx context.Context, fs FileSystem) error {
+	if fs == nil {
+		fs = DefaultFileSystem
+	}
 	if db.Filename == "" {
 		return errors.New("Filename not specified for DB")
 	}
@@ -195,7 +200,7 @@ func (db *DB) Save(ctx context.Context, fs FileSystem) error {
 			child := db.Children[i]
 			atomic.AddInt32(&count, 1)
 			go func() {
-				if err := child.Save(ctx, fs); err != nil {
+				if err := child.SaveWithFS(ctx, fs); err != nil {
 					out <- err
 				}
 				res := atomic.AddInt32(&count, -1)

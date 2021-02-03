@@ -10,7 +10,7 @@ import (
 )
 
 func runParse(raw string) (*DB, error) {
-	return Parse(raw, "")
+	return ParseString(raw, "")
 }
 
 func TestOpeningMultipleFileDatabase(t *testing.T) {
@@ -22,7 +22,7 @@ func TestOpeningMultipleFileDatabase(t *testing.T) {
 			},
 		}
 		ctx := context.Background()
-		db, err := OpenWithFS(ctx, fs, "main.db")
+		db, err := ReadFS(ctx, fs, "main.db")
 		if err != nil {
 			t.Fatalf("Failed to parse: %s", err)
 		}
@@ -40,7 +40,7 @@ func TestOpeningMultipleFileDatabase(t *testing.T) {
 			},
 		}
 		ctx := context.Background()
-		db, err := OpenWithFS(ctx, fs, "main.db")
+		db, err := ReadFS(ctx, fs, "main.db")
 		if err != nil {
 			t.Fatalf("Failed to parse: %s", err)
 		}
@@ -593,7 +593,7 @@ func TestSearchViaKeyValueInMultipleDBs(t *testing.T) {
 
 	ctx := context.Background()
 
-	db, err := OpenWithFS(ctx, fs, "main.db")
+	db, err := ReadFS(ctx, fs, "main.db")
 	if err != nil {
 		t.Fatalf("Failed to parse DB: %s", err)
 	}
@@ -662,7 +662,7 @@ func BenchmarkSearchViaKeyValueInMultipleDBs(b *testing.B) {
 
 	ctx := context.Background()
 
-	db, err := OpenWithFS(ctx, fs, "main.db")
+	db, err := ReadFS(ctx, fs, "main.db")
 	if err != nil {
 		b.Fatalf("Failed to parse DB: %s", err)
 	}

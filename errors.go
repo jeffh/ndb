@@ -16,6 +16,7 @@ var codeMap = map[ErrCode]string{
 	ErrCodeEqualsCannotBeKey:   "equals-cannot-be-key",
 	ErrCodeEqualsCannotBeValue: "equals-cannot-be-value",
 	ErrCodeKeyNotClosed:        "key-not-closed",
+	ErrCodeKeyCannotBeEmpty:    "key-cannot-be-empty",
 	ErrCodeValueNotClosed:      "value-not-closed",
 }
 

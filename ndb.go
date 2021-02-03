@@ -1,12 +1,16 @@
 package ndb
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"unicode"
 )
 
@@ -59,6 +63,8 @@ func Parse(raw, filename string) (*DB, error) {
 func ParseBytes(raw []byte, filename string) (*DB, error) { return Parse(string(raw), filename) }
 
 type DB struct {
+	Filename string
+
 	M        sync.RWMutex
 	Records  []Record
 	Children []*DB
@@ -145,6 +151,76 @@ func (db *DB) openChildren(ctx context.Context, fs FileSystem, seen map[string]s
 		db.Children = children
 	}
 	return it.Err()
+}
+
+func (db *DB) WithFilename(filename string) *DB {
+	db.Filename = filename
+	return db
+}
+
+func (db *DB) WithChildren(children ...*DB) *DB {
+	db.Children = children
+	return db
+}
+
+func (db *DB) Save(ctx context.Context, fs FileSystem) error {
+	if db.Filename == "" {
+		return errors.New("Filename not specified for DB")
+	}
+
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	f, err := fs.CreateOrTruncate(db.Filename)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	for i, record := range db.Records {
+		if i != 0 {
+			if _, err = f.Write([]byte("\n")); err != nil {
+				return err
+			}
+		}
+		if err = record.write(f); err != nil {
+			return err
+		}
+	}
+
+	if len(db.Children) > 0 {
+		out := make(chan error, len(db.Children))
+		count := int32(1)
+		for i := range db.Children {
+			child := db.Children[i]
+			atomic.AddInt32(&count, 1)
+			go func() {
+				if err := child.Save(ctx, fs); err != nil {
+					out <- err
+				}
+				res := atomic.AddInt32(&count, -1)
+				if res == 0 {
+					close(out)
+				}
+			}()
+		}
+		res := atomic.AddInt32(&count, -1)
+		if res == 0 {
+			close(out)
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case err, ok := <-out:
+			if !ok {
+				return nil
+			}
+			return err
+		}
+	}
+
+	return nil
 }
 
 // Len returns the number of records in the database, including children
@@ -497,7 +573,7 @@ func MakeRecord(kvs ...string) Record {
 	return r
 }
 
-func MakeRecordFromMap(m map[string]string) Record {
+func MakeRecordFromMap(m map[string][]string) Record {
 	size := len(m)
 	r := Record{
 		keys:   make([]string, 0, size),
@@ -505,9 +581,29 @@ func MakeRecordFromMap(m map[string]string) Record {
 	}
 	for k, v := range m {
 		r.keys = append(r.keys, k)
-		r.values = append(r.values, v)
+		if len(v) == 0 {
+			r.values = append(r.values, "")
+		} else {
+			r.values = append(r.values, v...)
+		}
 	}
 	return r
+}
+
+func (a Record) write(w io.Writer) error {
+	for i, k := range a.keys {
+		k = quoteIfNeeded(k)
+		v := quoteIfNeeded(a.values[i])
+		var spacing string
+		if i != 0 {
+			spacing = " "
+		}
+		_, err := w.Write([]byte(fmt.Sprintf("%s%s=%s", spacing, k, v)))
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (a Record) Len() int { return len(a.keys) }
@@ -591,13 +687,8 @@ func (a *Record) Add(t Tuple) {
 func (a Record) String() string {
 	var sb []string
 	for i, k := range a.keys {
-		if valueNeedsQuoting(k) {
-			k = fmt.Sprintf("%#v", k)
-		}
-		v := a.values[i]
-		if valueNeedsQuoting(v) {
-			v = fmt.Sprintf("%#v", v)
-		}
+		k = quoteIfNeeded(k)
+		v := quoteIfNeeded(a.values[i])
 		sb = append(sb, fmt.Sprintf("%s=%s", k, v))
 	}
 	return strings.Join(sb, " ")
@@ -616,7 +707,27 @@ func (a Record) Map() map[string][]string {
 func (a Record) Equal(b Record) bool { return reflect.DeepEqual(a.Map(), b.Map()) }
 
 func valueNeedsQuoting(x string) bool {
-	return strings.ContainsAny(x, "\t\n\v\f\r =\"")
+	return len(x) == 0 || strings.ContainsAny(x, "\t\n\v\f\r =\"")
+}
+
+var escaper *strings.Replacer
+
+func init() {
+	escaper = strings.NewReplacer(
+		"\\", "\\\\",
+		"\"", "\\\"",
+	)
+}
+
+func quoteIfNeeded(x string) string {
+	if valueNeedsQuoting(x) {
+		var buf bytes.Buffer
+		buf.Write([]byte("\""))
+		escaper.WriteString(&buf, x)
+		buf.Write([]byte("\""))
+		return buf.String()
+	}
+	return x
 }
 
 //////////////////////////////////////

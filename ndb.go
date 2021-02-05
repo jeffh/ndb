@@ -622,6 +622,22 @@ func (a Record) Values() []string {
 	copy(out, a.values)
 	return out
 }
+func (a Record) HasKey(key string) bool {
+	for _, k := range a.keys {
+		if k == key {
+			return true
+		}
+	}
+	return false
+}
+func (a Record) GetFirst(key string) (string, bool) {
+	for i, k := range a.keys {
+		if k == key {
+			return a.values[i], true
+		}
+	}
+	return "", false
+}
 func (a Record) KeyAt(index int) string   { return a.keys[index] }
 func (a Record) ValueAt(index int) string { return a.values[index] }
 func (a Record) ValuesForKey(key string) []string {
@@ -654,10 +670,13 @@ func (a Record) Tuples() []Tuple {
 // If n=0, then all tuples of the given key is deleted
 func (a *Record) Delete(key string, n int) {
 	numDel := 0
+	size := len(a.keys)
 	for i, k := range a.keys {
 		if k == key {
-			copy(a.keys[i:], a.keys[i+1:])
-			copy(a.values[i:], a.values[i+1:])
+			if i != size-1 {
+				copy(a.keys[i:], a.keys[i+1:])
+				copy(a.values[i:], a.values[i+1:])
+			}
 			a.keys = a.keys[:len(a.keys)-1]
 			a.values = a.values[:len(a.values)-1]
 			numDel++
@@ -668,10 +687,30 @@ func (a *Record) Delete(key string, n int) {
 	}
 }
 
+func (a *Record) ReplaceAt(i int, t Tuple) {
+	a.keys[i] = t.Key
+	a.values[i] = t.Value
+}
+
 func (a *Record) Replace(key, oldValue, newValue string) {
 	for i, k := range a.keys {
 		if k == key && a.values[i] == oldValue {
 			a.values[i] = newValue
+		}
+	}
+}
+
+func (a *Record) ReplaceTimes(key, oldValue, newValue string, n int) {
+	if n <= 0 {
+		return
+	}
+	for i, k := range a.keys {
+		if k == key && a.values[i] == oldValue {
+			a.values[i] = newValue
+			n--
+			if n == 0 {
+				return
+			}
 		}
 	}
 }
@@ -699,7 +738,7 @@ func (a Record) String() string {
 	return strings.Join(sb, " ")
 }
 
-func (a Record) Map() map[string][]string {
+func (a Record) AsMap() map[string][]string {
 	m := make(map[string][]string)
 	for i, k := range a.keys {
 		out, _ := m[k]
@@ -708,8 +747,19 @@ func (a Record) Map() map[string][]string {
 	return m
 }
 
+func (a Record) Copy() Record {
+	keys := make([]string, len(a.keys))
+	values := make([]string, len(a.values))
+	copy(keys, a.keys)
+	copy(values, a.values)
+	return Record{
+		keys:   keys,
+		values: values,
+	}
+}
+
 // TODO: optimize??
-func (a Record) Equal(b Record) bool { return reflect.DeepEqual(a.Map(), b.Map()) }
+func (a Record) Equal(b Record) bool { return reflect.DeepEqual(a.AsMap(), b.AsMap()) }
 
 var escaper *strings.Replacer
 

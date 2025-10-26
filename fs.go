@@ -37,12 +37,12 @@ func (fs *LocalFileSystem) CreateOrTruncate(filename string) (io.WriteCloser, er
 	return f, err
 }
 
-type SimulatedFileSystem struct {
+type MemoryFileSystem struct {
 	M     sync.Mutex
 	Files map[string]string
 }
 
-func (fs *SimulatedFileSystem) Open(filename string) (io.ReadCloser, error) {
+func (fs *MemoryFileSystem) Open(filename string) (io.ReadCloser, error) {
 	fs.M.Lock()
 	defer fs.M.Unlock()
 	if fs.Files == nil {
@@ -56,7 +56,7 @@ func (fs *SimulatedFileSystem) Open(filename string) (io.ReadCloser, error) {
 	return &readBuffer{*buf}, nil
 }
 
-func (fs *SimulatedFileSystem) CreateOrTruncate(filename string) (io.WriteCloser, error) {
+func (fs *MemoryFileSystem) CreateOrTruncate(filename string) (io.WriteCloser, error) {
 	fs.M.Lock()
 	defer fs.M.Unlock()
 	if fs.Files == nil {
@@ -75,7 +75,7 @@ type writeBuffer struct {
 	bytes.Buffer
 
 	filename string
-	out      *SimulatedFileSystem
+	out      *MemoryFileSystem
 }
 
 func (b *writeBuffer) Write(p []byte) (int, error) { return b.Buffer.Write(p) }

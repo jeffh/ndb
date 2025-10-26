@@ -22,7 +22,7 @@ func TestReadingFromEmbedFS(t *testing.T) {
 }
 
 func TestSimpleParse(t *testing.T) {
-	m := &SimulatedFileSystem{
+	m := &MemoryFileSystem{
 		Files: map[string]string{
 			"test.ndb": `givenName=John familyName=Doe # a comment`,
 			"multiple.ndb": `givenName=John familyName=Doe
@@ -126,7 +126,7 @@ provider=openai model=gpt-4o tokens
 }
 
 func TestDatabaseParse(t *testing.T) {
-	m := &SimulatedFileSystem{
+	m := &MemoryFileSystem{
 		Files: map[string]string{
 			"start.ndb": `database=
 	file=doe.ndb

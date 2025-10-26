@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"flag"
 	"fmt"
 	"os"
@@ -12,7 +11,7 @@ import (
 func main() {
 	flag.Usage = func() {
 		out := flag.CommandLine.Output()
-		fmt.Fprintf(out, "Usage: %s DB KEY VALUE\n", os.Args[0])
+		fmt.Fprintf(out, "Usage: %s DB [KEY [VALUE]]\n", os.Args[0])
 		flag.PrintDefaults()
 	}
 	flag.Parse()
@@ -22,37 +21,26 @@ func main() {
 		os.Exit(1)
 	}
 
-	ctx := context.Background()
 	filename := flag.Arg(0)
+	fs := &ndb.LocalFileSystem{}
+	db, err := ndb.Open(fs, filename)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to open: %s\n", err)
+		os.Exit(2)
+	}
+
 	if flag.NArg() >= 2 {
 		key := flag.Arg(1)
 		var value string
 		if flag.NArg() > 2 {
 			value = flag.Arg(2)
 		}
-		db, err := ndb.Read(ctx, filename)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Failed to open: %s", err)
-			os.Exit(2)
-		}
 
-		it := db.Search(key, value)
-		defer it.Close()
-		for it.Next() {
-			r := it.Record()
+		for r := range db.Search(ndb.HasAttrValue(key, value)) {
 			fmt.Printf(" - %s\n", r.String())
 		}
 	} else {
-		db, err := ndb.Read(ctx, filename)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Failed to open: %s", err)
-			os.Exit(2)
-		}
-
-		it := db.SearchPredicate(func(r *ndb.Record) bool { return true })
-		defer it.Close()
-		for it.Next() {
-			r := it.Record()
+		for r := range db.All() {
 			fmt.Printf(" - %s\n", r.String())
 		}
 	}

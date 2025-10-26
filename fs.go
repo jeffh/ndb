@@ -13,6 +13,16 @@ type FileSystem interface {
 	CreateOrTruncate(filename string) (io.WriteCloser, error)
 }
 
+type readCloserAdapter struct {
+	io.Reader
+	io.Closer
+}
+
+type writeCloserAdapter struct {
+	io.Writer
+	io.Closer
+}
+
 type LocalFileSystem struct{}
 
 var DefaultFileSystem FileSystem = &LocalFileSystem{}

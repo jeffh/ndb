@@ -6,7 +6,7 @@ import (
 )
 
 func TestFileNotFound(t *testing.T) {
-	fs := &SimulatedFileSystem{
+	fs := &MemoryFileSystem{
 		Files: map[string]string{},
 	}
 
@@ -32,7 +32,7 @@ func TestFileNotFound(t *testing.T) {
 }
 
 func TestDatabaseReferencesWithMissingFiles(t *testing.T) {
-	fs := &SimulatedFileSystem{
+	fs := &MemoryFileSystem{
 		Files: map[string]string{
 			"start.ndb": `database=
 	file=exists.ndb
@@ -50,7 +50,7 @@ func TestDatabaseReferencesWithMissingFiles(t *testing.T) {
 }
 
 func TestChangedMethod(t *testing.T) {
-	fs := &SimulatedFileSystem{
+	fs := &MemoryFileSystem{
 		Files: map[string]string{
 			"test.ndb": `person name=John`,
 		},
@@ -62,14 +62,14 @@ func TestChangedMethod(t *testing.T) {
 			t.Fatalf("unexpected error: %v", err)
 		}
 
-		// In the current implementation with SimulatedFileSystem,
+		// In the current implementation with MemoryFileSystem,
 		// Changed() will always read the file. Let's verify the behavior.
 		changed := db.Changed()
 		// The implementation always reads, so this tests the current behavior
 		t.Logf("Changed() returned: %v", changed)
 	})
 
-	t.Run("Changed detects file modifications in SimulatedFileSystem", func(t *testing.T) {
+	t.Run("Changed detects file modifications in MemoryFileSystem", func(t *testing.T) {
 		db, err := OpenOne(fs, "test.ndb")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
@@ -111,7 +111,7 @@ func TestOpenOnePanicsWithNilFileSystem(t *testing.T) {
 }
 
 func TestRecursiveDatabaseReferences(t *testing.T) {
-	fs := &SimulatedFileSystem{
+	fs := &MemoryFileSystem{
 		Files: map[string]string{
 			"level1.ndb": `database= file=level2.ndb
 person name=Level1`,
@@ -142,37 +142,33 @@ person name=Level2`,
 	}
 }
 
-// TestReadFilesBug specifically tests the bug at ndb.go:137
-// where n.data[i] should be n.data[idx] when skip > 0
+// TestReadFilesBug tests that database file references are loaded correctly.
+// This indirectly tests the fix for a bug where readFiles(skip) would write
+// data to incorrect indices when skip > 0, which occurs during recursive
+// database reference processing in Open().
 func TestReadFilesBug(t *testing.T) {
-	fs := &SimulatedFileSystem{
+	fs := &MemoryFileSystem{
 		Files: map[string]string{
-			"file0.ndb": `data0 value=zero`,
+			// start.ndb references file1 and file2
+			"start.ndb": `database= file=file1.ndb file=file2.ndb
+data0 value=zero`,
 			"file1.ndb": `data1 value=one`,
 			"file2.ndb": `data2 value=two`,
 		},
 	}
 
-	// First, open just file0
-	db, err := OpenOne(fs, "file0.ndb")
+	// Open() will:
+	// 1. Read start.ndb (index 0)
+	// 2. Find database references, add file1.ndb and file2.ndb
+	// 3. Call readFiles(1) to read the newly added files
+	// Without the bug fix, data would be written to wrong indices
+	db, err := Open(fs, "start.ndb")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// Manually add file1 and file2 to the database
-	db.files = append(db.files, "file1.ndb", "file2.ndb")
-	db.data = append(db.data, []byte{}, []byte{})
-	db.mods = append(db.mods, db.mods[0], db.mods[0])
-
-	// Now read the files starting from index 1 (simulating what Open() does)
-	// This triggers the bug where data gets written to wrong indices
-	_, err = db.readFiles(1)
-	if err != nil {
-		t.Fatalf("unexpected error reading files: %v", err)
-	}
-
-	// Check that each file's data is in the correct position
-	// Without the fix, file1's data goes to index 0 and file2's data goes to index 1
+	// Check that data from each file is correctly accessible
+	// If the bug exists, file data would be in wrong positions and searches would fail
 	records0 := db.SearchSlice(HasAttr("data0"))
 	records1 := db.SearchSlice(HasAttr("data1"))
 	records2 := db.SearchSlice(HasAttr("data2"))
@@ -200,7 +196,7 @@ func TestReadFilesBug(t *testing.T) {
 }
 
 func TestDatabaseReferencesWithDuplicates(t *testing.T) {
-	fs := &SimulatedFileSystem{
+	fs := &MemoryFileSystem{
 		Files: map[string]string{
 			"start.ndb": `database=
 	file=data.ndb
@@ -224,7 +220,7 @@ func TestDatabaseReferencesWithDuplicates(t *testing.T) {
 }
 
 func TestMultipleDatabaseAttributes(t *testing.T) {
-	fs := &SimulatedFileSystem{
+	fs := &MemoryFileSystem{
 		Files: map[string]string{
 			"start.ndb": `database= file=data1.ndb
 database= file=data2.ndb`,
@@ -245,7 +241,7 @@ database= file=data2.ndb`,
 }
 
 func TestOpenOneDoesNotFollowReferences(t *testing.T) {
-	fs := &SimulatedFileSystem{
+	fs := &MemoryFileSystem{
 		Files: map[string]string{
 			"start.ndb": `database= file=data.ndb
 person name=John`,
@@ -275,8 +271,8 @@ person name=John`,
 }
 
 func TestFileSystemInterface(t *testing.T) {
-	t.Run("SimulatedFileSystem CreateOrTruncate and Open", func(t *testing.T) {
-		fs := &SimulatedFileSystem{}
+	t.Run("MemoryFileSystem CreateOrTruncate and Open", func(t *testing.T) {
+		fs := &MemoryFileSystem{}
 
 		// Write some data
 		w, err := fs.CreateOrTruncate("test.ndb")
@@ -307,16 +303,16 @@ func TestFileSystemInterface(t *testing.T) {
 		}
 	})
 
-	t.Run("SimulatedFileSystem Open non-existent file", func(t *testing.T) {
-		fs := &SimulatedFileSystem{}
+	t.Run("MemoryFileSystem Open non-existent file", func(t *testing.T) {
+		fs := &MemoryFileSystem{}
 		_, err := fs.Open("nonexistent.ndb")
 		if err != os.ErrNotExist {
 			t.Fatalf("expected os.ErrNotExist, got %v", err)
 		}
 	})
 
-	t.Run("SimulatedFileSystem truncates existing file", func(t *testing.T) {
-		fs := &SimulatedFileSystem{
+	t.Run("MemoryFileSystem truncates existing file", func(t *testing.T) {
+		fs := &MemoryFileSystem{
 			Files: map[string]string{
 				"test.ndb": "original content",
 			},

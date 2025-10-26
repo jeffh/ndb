@@ -5,7 +5,7 @@ import (
 )
 
 func TestSearchWithHasAttr(t *testing.T) {
-	m := &SimulatedFileSystem{
+	m := &MemoryFileSystem{
 		Files: map[string]string{
 			"test.ndb": `person name=John age=30
 company name=Acme founded=1990
@@ -48,7 +48,7 @@ person name=Jane age=25 city=NYC`,
 }
 
 func TestSearchWithMultiplePredicates(t *testing.T) {
-	m := &SimulatedFileSystem{
+	m := &MemoryFileSystem{
 		Files: map[string]string{
 			"test.ndb": `person name=John age=30 city=NYC
 person name=Jane age=25 city=LA
@@ -93,7 +93,7 @@ company name=Acme city=NYC`,
 }
 
 func TestSearchEdgeCases(t *testing.T) {
-	m := &SimulatedFileSystem{
+	m := &MemoryFileSystem{
 		Files: map[string]string{
 			"test.ndb": `personage=50
 person age=30
@@ -122,7 +122,7 @@ superperson age=25`,
 }
 
 func TestAll(t *testing.T) {
-	m := &SimulatedFileSystem{
+	m := &MemoryFileSystem{
 		Files: map[string]string{
 			"test.ndb": `person name=John
 person name=Jane
@@ -147,7 +147,7 @@ company name=Acme`,
 }
 
 func TestFirst(t *testing.T) {
-	m := &SimulatedFileSystem{
+	m := &MemoryFileSystem{
 		Files: map[string]string{
 			"test.ndb": `person name=John age=30
 person name=Jane age=25
@@ -186,7 +186,7 @@ person name=Bob age=30`,
 }
 
 func TestIteratorEarlyTermination(t *testing.T) {
-	m := &SimulatedFileSystem{
+	m := &MemoryFileSystem{
 		Files: map[string]string{
 			"test.ndb": `person name=John
 person name=Jane
@@ -226,7 +226,7 @@ person name=Charlie`,
 }
 
 func TestSearchWithAttributeSubstring(t *testing.T) {
-	m := &SimulatedFileSystem{
+	m := &MemoryFileSystem{
 		Files: map[string]string{
 			"test.ndb": `name="John Doe" email="john@example.com"
 username="johndoe" fullname="John Doe"`,
@@ -261,7 +261,7 @@ username="johndoe" fullname="John Doe"`,
 }
 
 func TestSearchSlice(t *testing.T) {
-	m := &SimulatedFileSystem{
+	m := &MemoryFileSystem{
 		Files: map[string]string{
 			"test.ndb": `person name=John
 person name=Jane`,

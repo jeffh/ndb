@@ -1,805 +1,409 @@
 package ndb
 
 import (
+	"bufio"
 	"bytes"
-	"context"
-	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
-	"reflect"
-	"strings"
-	"sync"
-	"sync/atomic"
+	"iter"
+	"log/slog"
+	"slices"
+	"strconv"
+	"time"
 	"unicode"
+	"unicode/utf8"
 )
 
-type PredicateFunc func(r *Record) bool
-
-func FindKeyThen(r *Record, key string, pred func(fieldIndex int) bool) bool {
-	for i, size := 0, r.Len(); i < size; i++ {
-		if r.KeyAt(i) == key && pred(i) {
-			return true
-		}
-	}
-	return false
+type Ndb struct {
+	data  [][]byte
+	mods  []time.Time
+	files []string
+	sys   FileSystem
 }
 
-func ReadFS(ctx context.Context, fs FileSystem, filename string) (*DB, error) {
-	f, err := fs.Open(filename)
-	if err != nil {
-		return nil, err
+// Open opens a new Ndb database from the given file path. It will recursively resolve any
+// reference databases in the filepath.
+//
+// Referenced databases can be done with a database attribute followed by file
+// attributes in one entry:
+//
+// ```
+// database file="other.ndb" file="another.ndb" file="more.ndb"
+// ```
+//
+// Search resolves follows the ordering of files as they are specified.
+func Open(sys FileSystem, filepath string) (*Ndb, error) {
+	if sys == nil {
+		panic("sys is required")
 	}
-	defer f.Close()
-	buf, err := ioutil.ReadAll(f)
-	if err != nil {
-		return nil, err
+	db := &Ndb{
+		files: []string{filepath},
+		data:  make([][]byte, 1),
+		mods:  []time.Time{{}},
+		sys:   sys,
 	}
-	db, err := ParseBytes(buf, filename)
-	if err != nil {
-		return nil, err
-	}
-	err = db.OpenChildren(ctx, fs)
-	if err != nil {
-		return nil, err
-	}
-	return db, nil
-}
-
-func Read(ctx context.Context, filename string) (*DB, error) {
-	return ReadFS(ctx, DefaultFileSystem, filename)
-}
-
-// ParseString returns a DB from parsing a raw string
-func ParseString(raw, filename string) (*DB, error) {
-	recs, err := parseRecords(raw, filename)
-	if err != nil {
-		return nil, err
-	}
-	db := &DB{Records: recs, Filename: filename}
-	return db, nil
-}
-
-func ParseBytes(raw []byte, filename string) (*DB, error) { return ParseString(string(raw), filename) }
-
-type DB struct {
-	Filename string
-
-	M        sync.RWMutex
-	Records  []Record
-	Children []*DB
-}
-
-type Record struct {
-	keys   []string
-	values []string
-}
-
-type Tuple struct {
-	Key, Value string
-}
-
-func MakeDB(r []Record) *DB {
-	return &DB{Records: r}
-}
-
-func (db *DB) OpenChildren(ctx context.Context, fs FileSystem) error {
-	seen := make(map[string]struct{})
-	return db.openChildren(ctx, fs, seen)
-}
-
-func (db *DB) openChildren(ctx context.Context, fs FileSystem, seen map[string]struct{}) error {
-	db.M.Lock()
-	defer db.M.Unlock()
-	it := db.searchNoLock("database", "")
-
-	type result struct {
-		i   int
-		db  *DB
-		err error
-	}
-
-	res := make(chan result, 10)
-
-	subctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
-	numFiles := 0
-	for it.Next() {
-		r := it.Record()
-		files := r.ValuesForKey("file")
-		numFiles += len(files)
-		for i, file := range files {
-			if _, ok := seen[file]; !ok {
-				seen[file] = struct{}{}
-				go func(i int, file string) {
-					d, err := ReadFS(subctx, fs, file)
-					out := result{
-						i:   i,
-						db:  d,
-						err: err,
-					}
-
-					select {
-					case res <- out:
-					case <-subctx.Done():
-					}
-				}(i, file)
-			}
-		}
-	}
-	it.Close()
-
-	if numFiles > 0 {
-		children := make([]*DB, numFiles)
-		for i := 0; i < numFiles; i++ {
-			select {
-			case res := <-res:
-				if res.err != nil {
-					return res.err
-				}
-				children[res.i] = res.db
-			case <-ctx.Done():
-				return ctx.Err()
-			}
-		}
-		for i, c := range children {
-			if c == nil {
-				copy(children[i:], children[i+1:])
-			}
-		}
-		db.Children = children
-	}
-	return it.Err()
-}
-
-func (db *DB) WithFilename(filename string) *DB {
-	db.Filename = filename
-	return db
-}
-
-func (db *DB) WithChildren(children ...*DB) *DB {
-	db.Children = children
-	return db
-}
-
-func (db *DB) Save(ctx context.Context) error { return db.SaveWithFS(ctx, nil) }
-
-func (db *DB) SaveWithFS(ctx context.Context, fs FileSystem) error {
-	if fs == nil {
-		fs = DefaultFileSystem
-	}
-	if db.Filename == "" {
-		return errors.New("Filename not specified for DB")
-	}
-
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
-	f, err := fs.CreateOrTruncate(db.Filename)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-
-	for i, record := range db.Records {
-		if i != 0 {
-			if _, err = f.Write([]byte("\n")); err != nil {
-				return err
-			}
-		}
-		if err = record.write(f); err != nil {
-			return err
-		}
-	}
-
-	if len(db.Children) > 0 {
-		out := make(chan error, len(db.Children))
-		count := int32(1)
-		for i := range db.Children {
-			child := db.Children[i]
-			atomic.AddInt32(&count, 1)
-			go func() {
-				if err := child.SaveWithFS(ctx, fs); err != nil {
-					out <- err
-				}
-				res := atomic.AddInt32(&count, -1)
-				if res == 0 {
-					close(out)
-				}
-			}()
-		}
-		res := atomic.AddInt32(&count, -1)
-		if res == 0 {
-			close(out)
-		}
-
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case err, ok := <-out:
-			if !ok {
-				return nil
-			}
-			return err
-		}
-	}
-
-	return nil
-}
-
-// Len returns the number of records in the database, including children
-func (db *DB) Len() int {
-	db.M.RLock()
-	defer db.M.RUnlock()
-	n := len(db.Records)
-	for _, child := range db.Children {
-		n += child.Len()
-	}
-	return n
-}
-
-func (db *DB) searchNoLock(key, value string) *searchIterator {
-	return makeSearchIterator(context.Background(), db, false, key, value)
-}
-
-// SearchRoot only searches for records in the current database (and not any children)
-func (db *DB) SearchRoot(key, value string) Iterator {
-	return makeSearchIterator(context.Background(), db, true, key, value)
-}
-
-// Search returns an iterator of records that have the given key,value pair
-func (db *DB) Search(key, value string) Iterator {
-	it := makeSearchIterator(context.Background(), db, true, key, value)
-	if len(db.Children) == 0 {
-		return it
-	}
-
-	ch := make(chan Iterator, 1)
-	ch <- it
-
-	ctx, cancel := context.WithCancel(context.Background())
-
-	go func() {
-		db.M.RLock()
-		defer db.M.RUnlock()
-		for _, child := range db.Children {
-			select {
-			case <-ctx.Done():
-				return
-			default:
-				it := makeSearchIterator(ctx, child, true, key, value)
-				select {
-				case ch <- it:
-				case <-ctx.Done():
-					return
-				}
-			}
-		}
-
-		close(ch)
-	}()
-
-	return &lazyIterator{ctx: ctx, cancel: cancel, ch: ch}
-}
-
-// SearchPredicate filters over the database satisfies the predicate
-// value. pred is assumed to be a pure function that is safe to run in
-// multiple goroutines.
-func (db *DB) SearchPredicate(pred PredicateFunc) Iterator {
-	it := makePredicateSearchIterator(context.Background(), db, true, pred)
-	if len(db.Children) == 0 {
-		return it
-	}
-
-	ch := make(chan Iterator, 4)
-	ch <- it
-
-	ctx, cancel := context.WithCancel(context.Background())
-
-	go func() {
-		db.M.RLock()
-		defer db.M.RUnlock()
-		for _, child := range db.Children {
-			select {
-			case <-ctx.Done():
-				return
-			default:
-				it := makePredicateSearchIterator(ctx, child, true, pred)
-				select {
-				case ch <- it:
-				case <-ctx.Done():
-					return
-				}
-			}
-		}
-
-		close(ch)
-	}()
-
-	return &lazyIterator{ctx: ctx, cancel: cancel, ch: ch}
-}
-
-// Find behaves like Search, but returns a slice of all results that match the
-// given key value pair.
-func (db *DB) Find(key, value string) []Record {
-	return toSlice(db.Search(key, value))
-}
-
-// FindPredicate behaves like SearchPredicate, but returns a slice of all
-// results that match the given key and predicate.
-func (db *DB) FindPredicate(pred PredicateFunc) []Record {
-	return toSlice(db.SearchPredicate(pred))
-}
-
-// FindFirst returns the first record that matches the given key value pair.
-func (db *DB) FindFirst(key, value string) (Record, bool) {
-	return first(db.Search(key, value))
-}
-
-// FindFirstPredicate behaves like SearchPredicate, but returns a slice of all
-// results that match the given key and predicate.
-func (db *DB) FindFirstPredicate(pred PredicateFunc) (Record, bool) {
-	return first(db.SearchPredicate(pred))
-}
-
-func parseRecords(raw, filename string) ([]Record, error) {
-	const debug = false
-	// state
-	var (
-		isBeginningOfLine bool = true
-		parsingState      int  = parsingStart
-		startIndex        int
-		currTuple         Tuple
-
-		col, line int
-
-		records []Record
-		record  Record
-	)
-
-	if debug {
-		fmt.Printf("------------ PARSE\n")
-	}
-
-	for i, r := range raw {
-		col++
-		if isBeginningOfLine {
-			line++
-			col = 1
-		}
-		if debug {
-			fmt.Printf("[%d: %#v] Step: (isBeginningOfLine=%v, state=%s, line=%d, col=%d)\n", i, string(r), isBeginningOfLine, stateString(parsingState), line, col)
-		}
-		switch parsingState {
-		case parsingStart:
-			if isBeginningOfLine && r == '#' {
-				parsingState = parsingComment
-				startIndex = i
-			} else {
-				if isBeginningOfLine && !unicode.IsSpace(r) {
-					// new tuple, commit the one we're holding
-					if record.Len() != 0 {
-						records = append(records, record)
-						record = Record{}
-					}
-				}
-				if !unicode.IsSpace(r) {
-					startIndex = i
-					if r == '"' {
-						parsingState = parsingKeyQuoted
-					} else {
-						parsingState = parsingKey
-					}
-				}
-			}
-		case parsingKey:
-			isSpace := unicode.IsSpace(r)
-			if isSpace || r == '=' {
-				key := raw[startIndex:i]
-				if len(key) > 0 {
-					if key == "=" {
-						return nil, mkE(ErrCodeEqualsCannotBeKey, line, col, filename, "'=' is an invalid key. Please surround it in double quotes if you want to have it as a key.")
-					}
-					currTuple.Key = key
-					startIndex = i
-					if isSpace {
-						record.Add(currTuple)
-						currTuple = Tuple{}
-						parsingState = parsingStart
-					} else {
-						parsingState = parsingEqual
-					}
-				}
-			}
-		case parsingKeyQuoted:
-			if r == '"' {
-				numEscapes := 0
-				for j := i - 1; j >= 0; j-- {
-					if raw[j] != '\\' {
-						numEscapes = i - j - 1
-						break
-					}
-				}
-				if numEscapes%2 == 0 {
-					key := strings.ReplaceAll(raw[startIndex+1:i], "\\\\", "\\")
-					if len(key) > 0 {
-						currTuple.Key = key
-						parsingState = parsingEqual
-						startIndex = i + 1
-					} else {
-						return nil, mkE(ErrCodeKeyCannotBeEmpty, line, col, filename, "Keys cannot be empty.")
-					}
-				}
-			}
-		case parsingEqual:
-			if r == '=' {
-				if raw[startIndex:i] == "=" {
-					return nil, mkE(ErrCodeEqualsCannotBeValue, line, col, filename, "'=' is an invalid value. Please surround it in double quotes if you want to have it as a value.")
-				}
-			} else if unicode.IsSpace(r) {
-				record.Add(currTuple)
-				currTuple = Tuple{}
-				parsingState = parsingStart
-				startIndex = i + 1
-			} else {
-				startIndex = i
-				if r == '"' {
-					parsingState = parsingValueQuoted
-				} else {
-					parsingState = parsingValue
-				}
-			}
-		case parsingValue:
-			if unicode.IsSpace(r) {
-				currTuple.Value = raw[startIndex:i]
-				if currTuple.Value == "=" {
-					return nil, mkE(ErrCodeEqualsCannotBeValue, line, col, filename, "'=' is an invalid value. Please surround it in double quotes if you want to have it as a value.")
-				}
-				record.Add(currTuple)
-				currTuple = Tuple{}
-				parsingState = parsingStart
-				startIndex = i + 1
-			}
-		case parsingValueQuoted:
-			if r == '"' {
-				numEscapes := 0
-				for j := i - 1; j >= 0; j-- {
-					if raw[j] != '\\' {
-						numEscapes = i - j - 1
-						break
-					}
-				}
-				if numEscapes%2 == 0 {
-					currTuple.Value = raw[startIndex+1 : i]
-					record.Add(currTuple)
-					currTuple = Tuple{}
-					parsingState = parsingStart
-					startIndex = i + 1
-				}
-			}
-		case parsingComment:
-			if r == '\n' {
-				parsingState = parsingStart
-				startIndex = i + 1
-			}
-		}
-		isBeginningOfLine = r == '\n'
-	}
-
-	if debug {
-		fmt.Printf("[%d: $END] Step: (isBeginningOfLine=%v, state=%s, line=%d, col=%d)\n", len(raw), isBeginningOfLine, stateString(parsingState), line, col)
-	}
-
-	switch parsingState {
-	case parsingKey:
-		currTuple = Tuple{Key: raw[startIndex:]}
-		if currTuple.Key != "" {
-			if currTuple.Key == "=" {
-				return nil, mkE(ErrCodeEqualsCannotBeKey, line, col, filename, "'=' cannot be a key")
-			}
-			record.Add(currTuple)
-			records = append(records, record)
-		}
-	case parsingKeyQuoted:
-		return nil, mkE(ErrCodeKeyNotClosed, line, col, filename, "quote not closed for key")
-	case parsingEqual:
-		if currTuple.Key != "" {
-			record.Add(currTuple)
-			records = append(records, record)
-		}
-	case parsingValue:
-		if currTuple.Key != "" {
-			currTuple.Value = raw[startIndex:]
-			if currTuple.Value == "=" {
-				return nil, mkE(ErrCodeEqualsCannotBeValue, line, col, filename, "'=' is an invalid value. Please surround it in double quotes if you want to have it as a value.")
-			}
-			record.Add(currTuple)
-			records = append(records, record)
-		}
-	case parsingValueQuoted:
-		return nil, mkE(ErrCodeValueNotClosed, line, col, filename, "quote not closed for value")
-	default:
-		if record.Len() != 0 {
-			records = append(records, record)
-		}
-	}
-
-	return records, nil
-}
-
-const (
-	parsingStart = iota
-	parsingKey
-	parsingKeyQuoted
-	parsingEqual
-	parsingValue
-	parsingValueQuoted
-	parsingComment
-)
-
-func stateString(s int) string {
-	switch s {
-	case parsingStart:
-		return "start"
-	case parsingKey:
-		return "key"
-	case parsingKeyQuoted:
-		return "key-quoted"
-	case parsingEqual:
-		return "equal"
-	case parsingValue:
-		return "value"
-	case parsingValueQuoted:
-		return "value-quoted"
-	case parsingComment:
-		return "comment"
-	default:
-		panic("Unreachable")
-	}
-}
-
-////////////////////////////////
-
-func MakeRecord(kvs ...string) Record {
-	size := len(kvs)
-	if size%2 != 0 {
-		panic("kvs should be even number of items")
-	}
-	end := size / 2
-	r := Record{
-		keys:   make([]string, 0, end),
-		values: make([]string, 0, end),
-	}
-	for i := 0; i < size; i += 2 {
-		r.keys = append(r.keys, kvs[i])
-		r.values = append(r.values, kvs[i+1])
-	}
-	return r
-}
-
-func MakeRecordFromMap(m map[string][]string) Record {
-	size := len(m)
-	r := Record{
-		keys:   make([]string, 0, size),
-		values: make([]string, 0, size),
-	}
-	for k, v := range m {
-		r.keys = append(r.keys, k)
-		if len(v) == 0 {
-			r.values = append(r.values, "")
-		} else {
-			r.values = append(r.values, v...)
-		}
-	}
-	return r
-}
-
-func (a Record) write(w io.Writer) error {
-	for i, k := range a.keys {
-		k = quoteIfNeeded(k)
-		v := quoteIfNeeded(a.values[i])
-		var spacing string
-		if i != 0 {
-			spacing = " "
-		}
-		_, err := w.Write([]byte(fmt.Sprintf("%s%s=%s", spacing, k, v)))
+	count := 0
+	for {
+		n, err := db.readFiles(count)
 		if err != nil {
-			return err
+			return nil, err
+		}
+		if n == 0 {
+			break
+		}
+		count += n
+		for record := range db.Search(HasAttrValue("database", "")) {
+			for _, file := range record.GetAll("file") {
+				if !slices.Contains(db.files, file) {
+					db.files = append(db.files, file)
+					db.data = append(db.data, []byte{})
+					db.mods = append(db.mods, time.Time{})
+				}
+			}
 		}
 	}
-	return nil
+	return db, nil
 }
 
-func (a Record) Len() int { return len(a.keys) }
-func (a Record) Keys() []string {
-	out := make([]string, len(a.keys))
-	copy(out, a.keys)
-	return out
+// OpenOne opens a single file and returns a database. It will not recursively
+// open other database references.
+func OpenOne(sys FileSystem, filepath string) (*Ndb, error) {
+	if sys == nil {
+		panic("sys is required")
+	}
+	db := &Ndb{
+		files: []string{filepath},
+		data:  make([][]byte, 1),
+		mods:  []time.Time{{}},
+		sys:   sys,
+	}
+	if _, err := db.readFiles(0); err != nil {
+		return nil, err
+	}
+	return db, nil
 }
-func (a Record) Values() []string {
-	out := make([]string, len(a.values))
-	copy(out, a.values)
-	return out
+
+func ParseOne(p []byte) (*Ndb, error) {
+	db := &Ndb{
+		files: []string{"inline"},
+		data:  [][]byte{p},
+		mods:  []time.Time{{}},
+		sys:   nil,
+	}
+	return db, nil
 }
-func (a Record) HasKey(key string) bool {
-	for _, k := range a.keys {
-		if k == key {
-			return true
+
+func ParseOneString(s string) (*Ndb, error) {
+	return ParseOne([]byte(s))
+}
+
+func (n *Ndb) readFile(fileToRead string, lastSeen time.Time) ([]byte, time.Time, error) {
+	// For now, we always read the file. In a real implementation with a better FileSystem
+	// interface that supports Stat, we could check modification times.
+	// For SimplifiedFileSystem and similar in-memory systems, we just read every time.
+	modTime := time.Now()
+
+	f, err := n.sys.Open(fileToRead)
+	if err != nil {
+		slog.Warn("ndb: file not found", "file", fileToRead, "error", err)
+		return nil, time.Time{}, err
+	}
+	slog.Debug("ndb: load", "file", fileToRead)
+	buf, err := io.ReadAll(f)
+	_ = f.Close()
+	if err != nil {
+		return nil, modTime, err
+	}
+	// TODO: validate syntax
+	return buf, modTime, nil
+}
+
+func (n *Ndb) readFiles(skip int) (int, error) {
+	if n.sys == nil {
+		return 0, nil
+	}
+	count := 0
+	for i, fileToRead := range n.files[skip:] {
+		idx := i + skip
+		lastSeen := n.mods[idx]
+		buf, ts, err := n.readFile(fileToRead, lastSeen)
+		if err != nil {
+			return count, err
+		}
+		if buf == nil {
+			count++
+			continue
+		}
+		n.data[idx] = buf
+		n.mods[idx] = ts
+		count++
+		// TODO: validate syntax
+	}
+	return count, nil
+}
+
+// Changed reopens database files if they have been modified since last read.
+// Returns true if the database has been changed.
+func (n *Ndb) Changed() bool {
+	changed, _ := n.readFiles(0)
+	return changed > 0
+}
+
+// All returns an iterator that yields all records in the database.
+// This isn't particularly efficient to use in production, but may be useful when
+// debugging issues.
+//
+// Use Search to find records matching a specific attribute and value instead.
+func (n *Ndb) All() iter.Seq[Record] {
+	return n.byPredicate(func(rec []byte) bool { return true })
+}
+
+// AllSlice returns a slice of all records in the database. This isn't
+// efficient to use in production, but may be useful when debugging.
+//
+// Use SearchSlice to find records matching a specific attribute and value instead.
+func (n *Ndb) AllSlice() []Record { return toSlice(n.All()) }
+
+// SearchSlice returns a slice of records matching the given attribute and value.
+func (n *Ndb) SearchSlice(preds ...SearchPredicate) []Record { return toSlice(n.Search(preds...)) }
+
+// First returns the first record that matches the given attribute and value.
+func (n *Ndb) First(attr, val string) Record {
+	return first(n.Search(HasAttrValue(attr, val)))
+}
+
+// Search returns an iterator that yields records matching the given attribute and value.
+//
+// Example:
+//
+//	for rec := range db.Search("person", "") {
+//	   rec.Get("name")
+//	}
+//
+// This will yield all records with the attribute "person" like:
+//
+//	person name="John Doe"
+func (n *Ndb) Search(preds ...SearchPredicate) iter.Seq[Record] {
+	return n.byPredicate(func(rec []byte) bool {
+		for _, pred := range preds {
+			if !pred.match(rec) {
+				return false
+			}
+		}
+		return true
+	})
+}
+
+type SearchPredicate interface{ match(rec []byte) bool }
+type searchPredicate func(rec []byte) bool
+
+func (sp searchPredicate) match(rec []byte) bool { return sp(rec) }
+
+// HasAttr returns a predicate that matches records with the given attribute.
+func HasAttr(attr string) SearchPredicate {
+	return searchPredicate(func(rec []byte) bool {
+		return hasAttr(rec, attr)
+	})
+}
+
+// HasAttrValue returns a predicate that matches records with the given attribute and value.
+func HasAttrValue(attr, value string) SearchPredicate {
+	return searchPredicate(func(rec []byte) bool {
+		return hasAttrVal(rec, attr, value)
+	})
+}
+
+func (n *Ndb) byPredicate(allow func(rec []byte) bool) iter.Seq[Record] {
+	var results Record
+	return func(yield func(Record) bool) {
+		recBytes := []byte{}
+	loop:
+		for i := range n.data {
+			scanner := bufio.NewScanner(bytes.NewReader(n.data[i]))
+			for scanner.Scan() {
+				line := scanner.Bytes()
+				cIndex := bytes.IndexByte(line, '#')
+				if cIndex != -1 {
+					line = line[:cIndex]
+				}
+				if len(line) == 0 {
+					continue
+				}
+				first, _ := utf8.DecodeRune(line)
+
+				// is this line a new record?
+				if !unicode.IsSpace(first) {
+					if len(recBytes) > 0 {
+						if allow(recBytes) {
+							err := parseRecord(recBytes, &results)
+							if err != nil {
+								// fmt.Printf("parseRecord error: %v\n", err)
+								continue
+							}
+							if !yield(results) {
+								break loop
+							}
+						}
+					}
+					results.zero()
+					recBytes = recBytes[:0]
+				}
+				// append attributes as one line for parsing
+				line = bytes.TrimSpace(line)
+				if len(line) > 0 {
+					if len(recBytes) == 0 {
+						recBytes = append(recBytes, ' ')
+					}
+					recBytes = append(recBytes, line...)
+					recBytes = append(recBytes, ' ')
+				}
+			}
+			if len(recBytes) > 0 {
+				if allow(recBytes) {
+					err := parseRecord(recBytes, &results)
+					if err == nil {
+						if !yield(results) {
+							break
+						}
+					} else {
+						// TODO: handle parse error
+						_ = err // ignore parse errors for now
+					}
+				}
+			}
+			recBytes = recBytes[:0]
+		}
+	}
+}
+
+func hasAttr(recBytes []byte, attr string) bool {
+	attrKey := []byte(" " + attr + "=")
+	if bytes.Contains(recBytes, attrKey) {
+		return true
+	}
+	return bytes.Contains(recBytes, []byte(" "+attr+" "))
+}
+
+func hasAttrVal(recBytes []byte, attr, value string) bool {
+	attrKey := []byte(" " + attr + "=")
+	off := 0
+	for off < len(recBytes) {
+		idx := bytes.Index(recBytes[off:], attrKey)
+		if idx == -1 {
+			return len(value) == 0 && bytes.Contains(recBytes, []byte(" "+attr+" "))
+		}
+
+		valueStart := idx + len(attrKey)
+		if len(recBytes) <= valueStart {
+			return value == ""
+		}
+		first, _ := utf8.DecodeRune(recBytes[valueStart:])
+		if first == '"' {
+			length := bytes.IndexAny(recBytes[valueStart+1:], "\"")
+			if length == -1 {
+				length = len(recBytes) - valueStart
+			} else {
+				length += 2 // 1 for starting quote, and 1 for ending quote
+			}
+			off += idx + valueStart + length
+
+			// TODO: avoid string allocation
+			actualValue, err := strconv.Unquote(string(recBytes[valueStart : valueStart+length]))
+			if err == nil && value == actualValue {
+				return true
+			}
+		} else {
+			length := bytes.IndexAny(recBytes[valueStart:], " \t\r\n")
+			if length == -1 {
+				length = len(recBytes) - valueStart
+			}
+			off += idx + valueStart + length
+
+			if bytes.Equal([]byte(value), recBytes[valueStart:valueStart+length]) {
+				return true
+			}
 		}
 	}
 	return false
 }
-func (a Record) GetFirst(key string) (string, bool) {
-	for i, k := range a.keys {
-		if k == key {
-			return a.values[i], true
-		}
-	}
-	return "", false
-}
-func (a Record) KeyAt(index int) string   { return a.keys[index] }
-func (a Record) ValueAt(index int) string { return a.values[index] }
-func (a Record) ValuesForKey(key string) []string {
-	var out []string
-	for i, k := range a.keys {
-		if k == key {
-			out = append(out, a.values[i])
-		}
-	}
-	return out
-}
-func (a Record) TupleAt(index int) Tuple {
-	return Tuple{
-		Key:   a.keys[index],
-		Value: a.values[index],
-	}
-}
-func (a Record) Tuples() []Tuple {
-	out := make([]Tuple, a.Len())
-	for i, k := range a.keys {
-		out[i] = Tuple{
-			Key:   k,
-			Value: a.values[i],
-		}
-	}
-	return out
-}
 
-// Delete deletes N number of occurrences of a key.
-// If n=0, then all tuples of the given key is deleted
-func (a *Record) Delete(key string, n int) {
-	numDel := 0
-	size := len(a.keys)
-	for i, k := range a.keys {
-		if k == key {
-			if i != size-1 {
-				copy(a.keys[i:], a.keys[i+1:])
-				copy(a.values[i:], a.values[i+1:])
+func parseRecord(recBytes []byte, results *Record) error {
+	if results != nil {
+		if *results == nil {
+			*results = make(Record, 0, 10)
+		}
+	}
+	r := recBytes
+	for len(r) > 0 {
+		ch, size := utf8.DecodeRune(r)
+		if ch == utf8.RuneError {
+			return fmt.Errorf("invalid utf8 rune")
+		}
+		if unicode.IsSpace(ch) {
+			r = r[size:]
+			continue
+		}
+		tup, n, err := parseTuple(r)
+		if err == nil {
+			if results != nil {
+				*results = append(*results, tup)
 			}
-			a.keys = a.keys[:len(a.keys)-1]
-			a.values = a.values[:len(a.values)-1]
-			numDel++
-			if n != 0 && n == numDel {
-				return
-			}
+		} else {
+			return err
 		}
+		r = r[n:]
 	}
+	return nil
 }
 
-func (a *Record) ReplaceAt(i int, t Tuple) {
-	a.keys[i] = t.Key
-	a.values[i] = t.Value
-}
-
-func (a *Record) Replace(key, oldValue, newValue string) {
-	for i, k := range a.keys {
-		if k == key && a.values[i] == oldValue {
-			a.values[i] = newValue
-		}
+func parseTuple(p []byte) (Tuple, int, error) {
+	end := bytes.IndexAny(p, "= \t\r\n")
+	if end == -1 {
+		return Tuple{string(p), ""}, len(p), nil
 	}
-}
-
-func (a *Record) ReplaceTimes(key, oldValue, newValue string, n int) {
-	if n <= 0 {
-		return
-	}
-	for i, k := range a.keys {
-		if k == key && a.values[i] == oldValue {
-			a.values[i] = newValue
-			n--
-			if n == 0 {
-				return
-			}
-		}
-	}
-}
-
-// Put replaces the all keys found with the one tuple given
-func (a *Record) Put(t Tuple) {
-	a.Delete(t.Key, 0)
-	a.keys = append(a.keys, t.Key)
-	a.values = append(a.values, t.Value)
-}
-
-// Add adds a new key-value pair to the record
-func (a *Record) Add(t Tuple) {
-	a.keys = append(a.keys, t.Key)
-	a.values = append(a.values, t.Value)
-}
-
-func (a Record) String() string {
-	var sb []string
-	for i, k := range a.keys {
-		k = quoteIfNeeded(k)
-		v := quoteIfNeeded(a.values[i])
-		sb = append(sb, fmt.Sprintf("%s=%s", k, v))
-	}
-	return strings.Join(sb, " ")
-}
-
-func (a Record) AsMap() map[string][]string {
-	m := make(map[string][]string)
-	for i, k := range a.keys {
-		out, _ := m[k]
-		m[k] = append(out, a.values[i])
-	}
-	return m
-}
-
-func (a Record) Copy() Record {
-	keys := make([]string, len(a.keys))
-	values := make([]string, len(a.values))
-	copy(keys, a.keys)
-	copy(values, a.values)
-	return Record{
-		keys:   keys,
-		values: values,
-	}
-}
-
-// TODO: optimize??
-func (a Record) Equal(b Record) bool { return reflect.DeepEqual(a.AsMap(), b.AsMap()) }
-
-var escaper *strings.Replacer
-
-func init() {
-	escaper = strings.NewReplacer(
-		"\\", "\\\\",
-		"\"", "\\\"",
-	)
-}
-
-func quoteIfNeeded(x string) string {
-	if len(x) == 0 || strings.ContainsAny(x, "\t\n\v\f\r =\"") {
-		var buf bytes.Buffer
-		buf.Write([]byte("\""))
-		escaper.WriteString(&buf, x)
-		buf.Write([]byte("\""))
-		return buf.String()
-	}
-	return x
-}
-
-//////////////////////////////////////
-
-func first(it Iterator) (Record, bool) {
-	defer it.Close()
-	if it.Next() {
-		return *it.Record(), true
+	attr := string(p[:end])
+	if p[end] != '=' {
+		return Tuple{attr, ""}, end, nil
 	} else {
-		return Record{}, false
+		valueStart := end + 1
+		firstValue, _ := utf8.DecodeRune(p[valueStart:])
+		if firstValue == '"' {
+			length := bytes.IndexAny(p[valueStart+1:], "\"")
+			if length == -1 {
+				length = len(p) - valueStart
+			} else {
+				length += 2 // 1 for starting quote, and 1 for ending quote
+			}
+
+			actualValue, err := strconv.Unquote(string(p[valueStart : valueStart+length]))
+			if err != nil {
+				return Tuple{}, valueStart + length, err
+			}
+			return Tuple{attr, actualValue}, valueStart + length, nil
+		} else {
+			length := bytes.IndexAny(p[valueStart:], " \t\r\n")
+			if length == -1 {
+				length = len(p) - valueStart
+			}
+
+			return Tuple{attr, string(p[valueStart : valueStart+length])}, valueStart + length, nil
+		}
 	}
 }
 
-func toSlice(it Iterator) []Record {
-	var out []Record
-	defer it.Close()
-	for it.Next() {
-		out = append(out, *it.Record())
+func toSlice(it iter.Seq[Record]) []Record {
+	var results []Record
+	for rec := range it {
+		newRecord := make(Record, len(rec))
+		copy(newRecord, rec)
+		results = append(results, newRecord)
 	}
-	if it.Err() != nil {
-		return nil
+	return results
+}
+
+func first(it iter.Seq[Record]) Record {
+	for rec := range it {
+		return rec
 	}
-	return out
+	return nil
 }

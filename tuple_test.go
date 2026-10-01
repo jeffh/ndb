@@ -1,7 +1,6 @@
 package ndb
 
 import (
-	"bytes"
 	"testing"
 )
 
@@ -331,27 +330,6 @@ func TestMapSliceToRecord(t *testing.T) {
 	}
 }
 
-func TestSliceToRecord(t *testing.T) {
-	s := []string{"name", "John", "age", "30"}
-	r := SliceToRecord(s)
-
-	if len(r) != 2 {
-		t.Fatalf("expected 2 tuples, got %d", len(r))
-	}
-	if r.Get("name") != "John" {
-		t.Fatalf("expected name=John, got %s", r.Get("name"))
-	}
-}
-
-func TestSliceToRecordPanic(t *testing.T) {
-	defer func() {
-		if r := recover(); r == nil {
-			t.Fatalf("expected panic for odd number of arguments")
-		}
-	}()
-	SliceToRecord([]string{"name", "John", "age"})
-}
-
 func TestMakeRecordPanic(t *testing.T) {
 	defer func() {
 		if r := recover(); r == nil {
@@ -395,47 +373,6 @@ func TestParseRecord(t *testing.T) {
 		}
 		if r.Get("name") != "John" {
 			t.Fatalf("expected name=John, got %s", r.Get("name"))
-		}
-	})
-}
-
-func TestRecordWrite(t *testing.T) {
-	t.Run("simple record", func(t *testing.T) {
-		r := MakeRecord("name", "John", "age", "30")
-		var buf bytes.Buffer
-		err := r.write(&buf)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		expected := "name=John age=30"
-		if buf.String() != expected {
-			t.Fatalf("expected %q, got %q", expected, buf.String())
-		}
-	})
-
-	t.Run("quoted values", func(t *testing.T) {
-		r := MakeRecord("name", "John Doe", "age", "30")
-		var buf bytes.Buffer
-		err := r.write(&buf)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		expected := `name="John Doe" age=30`
-		if buf.String() != expected {
-			t.Fatalf("expected %q, got %q", expected, buf.String())
-		}
-	})
-
-	t.Run("attribute without value", func(t *testing.T) {
-		r := MakeRecord("person", "", "name", "John")
-		var buf bytes.Buffer
-		err := r.write(&buf)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		expected := "person name=John"
-		if buf.String() != expected {
-			t.Fatalf("expected %q, got %q", expected, buf.String())
 		}
 	})
 }

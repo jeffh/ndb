@@ -31,12 +31,12 @@ func main() {
 
 	if flag.NArg() >= 2 {
 		key := flag.Arg(1)
-		var value string
+		pred := ndb.HasAttr(key)
 		if flag.NArg() > 2 {
-			value = flag.Arg(2)
+			pred = ndb.HasAttrValue(key, flag.Arg(2))
 		}
 
-		for r := range db.Search(ndb.HasAttrValue(key, value)) {
+		for r := range db.Search(pred) {
 			fmt.Printf(" - %s\n", r.String())
 		}
 	} else {

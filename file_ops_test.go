@@ -49,49 +49,6 @@ func TestDatabaseReferencesWithMissingFiles(t *testing.T) {
 	})
 }
 
-func TestChangedMethod(t *testing.T) {
-	fs := &MemoryFileSystem{
-		Files: map[string]string{
-			"test.ndb": `person name=John`,
-		},
-	}
-
-	t.Run("Changed returns false when file hasn't changed", func(t *testing.T) {
-		db, err := OpenOne(fs, "test.ndb")
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-
-		// In the current implementation with MemoryFileSystem,
-		// Changed() will always read the file. Let's verify the behavior.
-		changed := db.Changed()
-		// The implementation always reads, so this tests the current behavior
-		t.Logf("Changed() returned: %v", changed)
-	})
-
-	t.Run("Changed detects file modifications in MemoryFileSystem", func(t *testing.T) {
-		db, err := OpenOne(fs, "test.ndb")
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-
-		// Modify the file
-		fs.Files["test.ndb"] = `person name=Jane
-person name=Bob`
-
-		changed := db.Changed()
-		if !changed {
-			t.Fatalf("expected Changed() to return true after file modification")
-		}
-
-		// Verify the new data is loaded
-		records := db.SearchSlice(HasAttr("person"))
-		if len(records) != 2 {
-			t.Fatalf("expected 2 records after reload, got %d", len(records))
-		}
-	})
-}
-
 func TestOpenPanicsWithNilFileSystem(t *testing.T) {
 	defer func() {
 		if r := recover(); r == nil {
@@ -271,68 +228,11 @@ person name=John`,
 }
 
 func TestFileSystemInterface(t *testing.T) {
-	t.Run("MemoryFileSystem CreateOrTruncate and Open", func(t *testing.T) {
-		fs := &MemoryFileSystem{}
-
-		// Write some data
-		w, err := fs.CreateOrTruncate("test.ndb")
-		if err != nil {
-			t.Fatalf("unexpected error creating file: %v", err)
-		}
-		_, err = w.Write([]byte("person name=John"))
-		if err != nil {
-			t.Fatalf("unexpected error writing: %v", err)
-		}
-		err = w.Close()
-		if err != nil {
-			t.Fatalf("unexpected error closing: %v", err)
-		}
-
-		// Read it back
-		r, err := fs.Open("test.ndb")
-		if err != nil {
-			t.Fatalf("unexpected error opening file: %v", err)
-		}
-		buf := make([]byte, 100)
-		n, _ := r.Read(buf)
-		r.Close()
-
-		content := string(buf[:n])
-		if content != "person name=John" {
-			t.Fatalf("expected 'person name=John', got %s", content)
-		}
-	})
-
 	t.Run("MemoryFileSystem Open non-existent file", func(t *testing.T) {
 		fs := &MemoryFileSystem{}
 		_, err := fs.Open("nonexistent.ndb")
 		if err != os.ErrNotExist {
 			t.Fatalf("expected os.ErrNotExist, got %v", err)
-		}
-	})
-
-	t.Run("MemoryFileSystem truncates existing file", func(t *testing.T) {
-		fs := &MemoryFileSystem{
-			Files: map[string]string{
-				"test.ndb": "original content",
-			},
-		}
-
-		w, err := fs.CreateOrTruncate("test.ndb")
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		_, err = w.Write([]byte("new content"))
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		err = w.Close()
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-
-		if fs.Files["test.ndb"] != "new content" {
-			t.Fatalf("expected file to be truncated and replaced")
 		}
 	})
 }

@@ -182,7 +182,3 @@ func (w *embedFSWrapper) Open(filename string) (io.ReadCloser, error) {
 	// fs.File implements both Read and Close
 	return f.(io.ReadCloser), nil
 }
-
-func (w *embedFSWrapper) CreateOrTruncate(filename string) (io.WriteCloser, error) {
-	panic("embedFS does not support writing")
-}

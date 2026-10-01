@@ -9,14 +9,12 @@ import (
 	"log/slog"
 	"slices"
 	"strconv"
-	"time"
 	"unicode"
 	"unicode/utf8"
 )
 
 type Ndb struct {
 	data  [][]byte
-	mods  []time.Time
 	files []string
 	sys   FileSystem
 }
@@ -39,7 +37,6 @@ func Open(sys FileSystem, filepath string) (*Ndb, error) {
 	db := &Ndb{
 		files: []string{filepath},
 		data:  make([][]byte, 1),
-		mods:  []time.Time{{}},
 		sys:   sys,
 	}
 	count := 0
@@ -57,7 +54,6 @@ func Open(sys FileSystem, filepath string) (*Ndb, error) {
 				if !slices.Contains(db.files, file) {
 					db.files = append(db.files, file)
 					db.data = append(db.data, []byte{})
-					db.mods = append(db.mods, time.Time{})
 				}
 			}
 		}
@@ -74,7 +70,6 @@ func OpenOne(sys FileSystem, filepath string) (*Ndb, error) {
 	db := &Ndb{
 		files: []string{filepath},
 		data:  make([][]byte, 1),
-		mods:  []time.Time{{}},
 		sys:   sys,
 	}
 	if _, err := db.readFiles(0); err != nil {
@@ -87,7 +82,6 @@ func ParseOne(p []byte) (*Ndb, error) {
 	db := &Ndb{
 		files: []string{"inline"},
 		data:  [][]byte{p},
-		mods:  []time.Time{{}},
 		sys:   nil,
 	}
 	return db, nil
@@ -97,25 +91,19 @@ func ParseOneString(s string) (*Ndb, error) {
 	return ParseOne([]byte(s))
 }
 
-func (n *Ndb) readFile(fileToRead string, lastSeen time.Time) ([]byte, time.Time, error) {
-	// For now, we always read the file. In a real implementation with a better FileSystem
-	// interface that supports Stat, we could check modification times.
-	// For SimplifiedFileSystem and similar in-memory systems, we just read every time.
-	modTime := time.Now()
-
+func (n *Ndb) readFile(fileToRead string) ([]byte, error) {
 	f, err := n.sys.Open(fileToRead)
 	if err != nil {
 		slog.Warn("ndb: file not found", "file", fileToRead, "error", err)
-		return nil, time.Time{}, err
+		return nil, err
 	}
 	slog.Debug("ndb: load", "file", fileToRead)
 	buf, err := io.ReadAll(f)
 	_ = f.Close()
 	if err != nil {
-		return nil, modTime, err
+		return nil, err
 	}
-	// TODO: validate syntax
-	return buf, modTime, nil
+	return buf, nil
 }
 
 func (n *Ndb) readFiles(skip int) (int, error) {
@@ -125,28 +113,14 @@ func (n *Ndb) readFiles(skip int) (int, error) {
 	count := 0
 	for i, fileToRead := range n.files[skip:] {
 		idx := i + skip
-		lastSeen := n.mods[idx]
-		buf, ts, err := n.readFile(fileToRead, lastSeen)
+		buf, err := n.readFile(fileToRead)
 		if err != nil {
 			return count, err
 		}
-		if buf == nil {
-			count++
-			continue
-		}
 		n.data[idx] = buf
-		n.mods[idx] = ts
 		count++
-		// TODO: validate syntax
 	}
 	return count, nil
-}
-
-// Changed reopens database files if they have been modified since last read.
-// Returns true if the database has been changed.
-func (n *Ndb) Changed() bool {
-	changed, _ := n.readFiles(0)
-	return changed > 0
 }
 
 // All returns an iterator that yields all records in the database.
@@ -172,17 +146,7 @@ func (n *Ndb) First(attr, val string) Record {
 	return first(n.Search(HasAttrValue(attr, val)))
 }
 
-// Search returns an iterator that yields records matching the given attribute and value.
-//
-// Example:
-//
-//	for rec := range db.Search("person", "") {
-//	   rec.Get("name")
-//	}
-//
-// This will yield all records with the attribute "person" like:
-//
-//	person name="John Doe"
+// Search returns an iterator that yields records matching the given predicates.
 func (n *Ndb) Search(preds ...SearchPredicate) iter.Seq[Record] {
 	return n.byPredicate(func(rec []byte) bool {
 		for _, pred := range preds {

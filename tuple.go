@@ -1,8 +1,6 @@
 package ndb
 
 import (
-	"fmt"
-	"io"
 	"slices"
 	"sort"
 	"strconv"
@@ -46,20 +44,6 @@ func MapSliceToRecord(m map[string][]string) Record {
 		for _, v := range vs {
 			r = append(r, Tuple{k, v})
 		}
-	}
-	return r
-}
-
-// SliceToRecord creates a Record from a list of attribute-value pairs. The number of arguments must be even.
-func SliceToRecord(s []string) Record {
-	if len(s)%2 == 1 {
-		panic("SliceToRecord() requires an even number of arguments")
-	}
-	r := make(Record, len(s)/2)
-	j := 0
-	for i := 0; i < len(s); i += 2 {
-		r[j] = Tuple{s[i], s[i+1]}
-		j++
 	}
 	return r
 }
@@ -157,8 +141,6 @@ func needsQuote(s string) bool {
 	return false
 }
 
-// Additional methods for backward compatibility
-
 // Len returns the number of tuples in the record
 func (r Record) Len() int { return len(r) }
 
@@ -181,21 +163,11 @@ func (r Record) HasKey(key string) bool {
 	return false
 }
 
-// GetFirst returns the first value for the given key (same as Lookup)
-func (r Record) GetFirst(key string) (string, bool) {
-	return r.Lookup(key)
-}
-
 // KeyAt returns the key at the given index
 func (r Record) KeyAt(index int) string { return r[index].Attr }
 
 // ValueAt returns the value at the given index
 func (r Record) ValueAt(index int) string { return r[index].Val }
-
-// ValuesForKey returns all values for the given key (same as GetAll)
-func (r Record) ValuesForKey(key string) []string {
-	return r.GetAll(key)
-}
 
 // TupleAt returns the tuple at the given index
 func (r Record) TupleAt(index int) Tuple {
@@ -311,38 +283,4 @@ func (r Record) Equal(other Record) bool {
 		}
 	}
 	return true
-}
-
-// write writes the record to a writer in NDB format
-func (r Record) write(w io.Writer) error {
-	for i, t := range r {
-		var spacing string
-		if i != 0 {
-			spacing = " "
-		}
-
-		// Quote attribute if needed
-		attr := t.Attr
-		if needsQuote(attr) {
-			attr = strconv.Quote(attr)
-		}
-
-		// Quote value if needed
-		val := t.Val
-		if val == "" {
-			_, err := w.Write([]byte(fmt.Sprintf("%s%s", spacing, attr)))
-			if err != nil {
-				return err
-			}
-		} else {
-			if needsQuote(val) {
-				val = strconv.Quote(val)
-			}
-			_, err := w.Write([]byte(fmt.Sprintf("%s%s=%s", spacing, attr, val)))
-			if err != nil {
-				return err
-			}
-		}
-	}
-	return nil
 }

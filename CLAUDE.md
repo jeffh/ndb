@@ -111,13 +111,10 @@ db.Search(HasAttr("person"), HasAttrValue("name", "John"))
 
 3. **Recursive File Loading**: `Open()` follows database references, while `OpenOne()` does not. The `Open()` implementation loads files in multiple passes to handle recursive references.
 
-4. **File Change Detection**: `Changed()` method re-reads files to detect modifications (current implementation always reloads with `MemoryFileSystem`).
-
 ## Testing Guidelines
 
 - **Test cases should only use the Public API** - This is the primary project constraint
 - Tests use `MemoryFileSystem` for in-memory testing
-- Property-based testing uses `github.com/leanovate/gopter`
 - Helper functions: `mustOpen(t, fs, path)`, `mustOpenOne(t, fs, path)`, `must(t, err)`
 - Use `db.SearchSlice()` in tests for simpler assertions
 - Example databases are embedded in `example/` directory using `//go:embed`

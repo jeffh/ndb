@@ -63,7 +63,7 @@ make
 - **`Record`**: A slice of `Tuple` representing a single ndb record
   - Provides multiple accessor methods: `Get()`, `GetAll()`, `Lookup()`, `HasKey()`
   - Index-based access: `KeyAt()`, `ValueAt()`, `TupleAt()`
-  - Mutation methods: `Add()`, `Put()`, `Delete()`, `Replace()`
+  - Mutation methods: `Add(Tuple)`, `Put(Tuple)`, `Delete(key, n)`, `Replace(key, old, new)` / `ReplaceAt(i, Tuple)`
   - Conversion: `AsMap()`, `Keys()`, `Values()`
 
 - **`Tuple`**: Basic attribute-value pair with `Attr` and `Val` fields

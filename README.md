@@ -42,7 +42,7 @@ import (
 
 func main() {
     // Open a database file
-    db, err := ndb.Open(ndb.LocalFileSystem{}, "hosts.ndb")
+    db, err := ndb.Open(&ndb.LocalFileSystem{}, "hosts.ndb")
     if err != nil {
         panic(err)
     }
@@ -62,13 +62,13 @@ func main() {
 
 ```go
 // Open a database (follows file references)
-db, err := ndb.Open(ndb.LocalFileSystem{}, "database.ndb")
+db, err := ndb.Open(&ndb.LocalFileSystem{}, "database.ndb")
 
 // Open single file (no recursion)
-db, err := ndb.OpenOne(ndb.LocalFileSystem{}, "database.ndb")
+db, err := ndb.OpenOne(&ndb.LocalFileSystem{}, "database.ndb")
 
 // Parse in-memory data
-db := ndb.ParseOneString("ip=192.168.1.1 sys=server01\n")
+db, err := ndb.ParseOneString("ip=192.168.1.1 sys=server01\n")
 ```
 
 ### Searching
@@ -76,7 +76,7 @@ db := ndb.ParseOneString("ip=192.168.1.1 sys=server01\n")
 The library provides iterator-based searching for efficient, lazy evaluation:
 
 ```go
-// Search for records with an attribute
+// Search reuses one Record; copy it (rec.Copy()) to retain past the loop.
 for rec := range db.Search(ndb.HasAttr("ip")) {
     fmt.Println(rec.Get("ip"))
 }
@@ -123,8 +123,8 @@ for i := 0; i < rec.Len(); i++ {
     fmt.Printf("%s=%s\n", attr, val)
 }
 
-// Convert to map
-m := rec.AsMap()  // Last value wins for duplicate keys
+// Convert to map (all values kept)
+m := rec.AsMap()  // map[string][]string
 
 // Get all keys/values
 keys := rec.Keys()
@@ -134,17 +134,12 @@ values := rec.Values()
 ### Modifying Records
 
 ```go
-// Add a tuple
-rec = rec.Add("ip", "192.168.1.1")
-
-// Replace value (updates first occurrence)
-rec = rec.Put("ip", "192.168.1.2")
-
-// Delete all occurrences of an attribute
-rec = rec.Delete("ip")
-
-// Replace specific occurrence
-rec = rec.Replace(0, "ip", "192.168.1.3")
+// Pointer methods mutate in place
+rec.Add(ndb.Tuple{Attr: "ip", Val: "192.168.1.1"})
+rec.Put(ndb.Tuple{Attr: "ip", Val: "192.168.1.2"})
+rec.Delete("ip", 0) // n=0 deletes all
+rec.Replace("ip", "192.168.1.2", "192.168.1.3")
+rec.ReplaceAt(0, ndb.Tuple{Attr: "ip", Val: "192.168.1.3"})
 ```
 
 ### File References

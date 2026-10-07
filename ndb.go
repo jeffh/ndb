@@ -242,36 +242,15 @@ func hasAttrVal(recBytes []byte, attr, value string) bool {
 		if idx == -1 {
 			return len(value) == 0 && bytes.Contains(recBytes, []byte(" "+attr+" "))
 		}
-
-		valueStart := idx + len(attrKey)
-		if len(recBytes) <= valueStart {
-			return value == ""
+		off += idx + 1
+		tup, n, err := parseTuple(recBytes[off:])
+		if err == nil && tup.Val == value {
+			return true
 		}
-		first, _ := utf8.DecodeRune(recBytes[valueStart:])
-		if first == '"' {
-			length := bytes.IndexAny(recBytes[valueStart+1:], "\"")
-			if length == -1 {
-				length = len(recBytes) - valueStart
-			} else {
-				length += 2 // 1 for starting quote, and 1 for ending quote
-			}
-			off += idx + valueStart + length
-
-			actualValue, err := strconv.Unquote(string(recBytes[valueStart : valueStart+length]))
-			if err == nil && value == actualValue {
-				return true
-			}
-		} else {
-			length := bytes.IndexAny(recBytes[valueStart:], " \t\r\n")
-			if length == -1 {
-				length = len(recBytes) - valueStart
-			}
-			off += idx + valueStart + length
-
-			if bytes.Equal([]byte(value), recBytes[valueStart:valueStart+length]) {
-				return true
-			}
+		if n <= 0 {
+			return false
 		}
+		off += n
 	}
 	return false
 }

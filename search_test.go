@@ -260,6 +260,36 @@ username="johndoe" fullname="John Doe"`,
 	})
 }
 
+func TestSearchDuplicateAttrLaterValue(t *testing.T) {
+	t.Run("unquoted later value", func(t *testing.T) {
+		db, err := ParseOneString("sys=a ip=1.2.3.4 ip=5.6.7.8")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		records := db.SearchSlice(HasAttrValue("ip", "5.6.7.8"))
+		if len(records) != 1 {
+			t.Fatalf("expected 1 record for ip=5.6.7.8, got %d", len(records))
+		}
+		if records[0].Get("sys") != "a" {
+			t.Fatalf("expected sys=a, got %s", records[0].Get("sys"))
+		}
+	})
+
+	t.Run("quoted later value", func(t *testing.T) {
+		db, err := ParseOneString(`sys=a ip="1.2.3.4" ip="5.6.7.8"`)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		records := db.SearchSlice(HasAttrValue("ip", "5.6.7.8"))
+		if len(records) != 1 {
+			t.Fatalf("expected 1 record for quoted ip=5.6.7.8, got %d", len(records))
+		}
+		if records[0].Get("sys") != "a" {
+			t.Fatalf("expected sys=a, got %s", records[0].Get("sys"))
+		}
+	})
+}
+
 func TestSearchSlice(t *testing.T) {
 	m := &MemoryFileSystem{
 		Files: map[string]string{

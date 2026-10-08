@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"iter"
-	"log/slog"
 	"slices"
 	"strconv"
 	"unicode"
@@ -28,8 +27,6 @@ type Ndb struct {
 // ```
 // database file="other.ndb" file="another.ndb" file="more.ndb"
 // ```
-//
-// Search resolves follows the ordering of files as they are specified.
 func Open(sys FileSystem, filepath string) (*Ndb, error) {
 	if sys == nil {
 		panic("sys is required")
@@ -94,10 +91,8 @@ func ParseOneString(s string) (*Ndb, error) {
 func (n *Ndb) readFile(fileToRead string) ([]byte, error) {
 	f, err := n.sys.Open(fileToRead)
 	if err != nil {
-		slog.Warn("ndb: file not found", "file", fileToRead, "error", err)
 		return nil, err
 	}
-	slog.Debug("ndb: load", "file", fileToRead)
 	buf, err := io.ReadAll(f)
 	_ = f.Close()
 	if err != nil {
@@ -127,7 +122,7 @@ func (n *Ndb) readFiles(skip int) (int, error) {
 // This isn't particularly efficient to use in production, but may be useful when
 // debugging issues.
 //
-// Use Search to find records matching a specific attribute and value instead.
+// Use Search to find matching records instead.
 func (n *Ndb) All() iter.Seq[Record] {
 	return n.byPredicate(func(rec []byte) bool { return true })
 }
@@ -135,10 +130,10 @@ func (n *Ndb) All() iter.Seq[Record] {
 // AllSlice returns a slice of all records in the database. This isn't
 // efficient to use in production, but may be useful when debugging.
 //
-// Use SearchSlice to find records matching a specific attribute and value instead.
+// Use SearchSlice to find matching records instead.
 func (n *Ndb) AllSlice() []Record { return toSlice(n.All()) }
 
-// SearchSlice returns a slice of records matching the given attribute and value.
+// SearchSlice returns a slice of records matching the given predicates.
 func (n *Ndb) SearchSlice(preds ...SearchPredicate) []Record { return toSlice(n.Search(preds...)) }
 
 // First returns the first record that matches the given attribute and value.
@@ -195,24 +190,19 @@ func (n *Ndb) byPredicate(allow func(rec []byte) bool) iter.Seq[Record] {
 				}
 				first, _ := utf8.DecodeRune(line)
 
-				// is this line a new record?
 				if !unicode.IsSpace(first) {
 					if len(recBytes) > 0 {
 						if allow(recBytes) {
-							err := parseRecord(recBytes, &results)
-							if err != nil {
-								// fmt.Printf("parseRecord error: %v\n", err)
-								continue
-							}
-							if !yield(results) {
-								break loop
+							if err := parseRecord(recBytes, &results); err == nil {
+								if !yield(results) {
+									break loop
+								}
 							}
 						}
 					}
 					results.zero()
 					recBytes = recBytes[:0]
 				}
-				// append attributes as one line for parsing
 				line = bytes.TrimSpace(line)
 				if len(line) > 0 {
 					if len(recBytes) == 0 {
@@ -224,14 +214,10 @@ func (n *Ndb) byPredicate(allow func(rec []byte) bool) iter.Seq[Record] {
 			}
 			if len(recBytes) > 0 {
 				if allow(recBytes) {
-					err := parseRecord(recBytes, &results)
-					if err == nil {
+					if err := parseRecord(recBytes, &results); err == nil {
 						if !yield(results) {
 							break
 						}
-					} else {
-						// TODO: handle parse error
-						_ = err // ignore parse errors for now
 					}
 				}
 			}
@@ -271,7 +257,6 @@ func hasAttrVal(recBytes []byte, attr, value string) bool {
 			}
 			off += idx + valueStart + length
 
-			// TODO: avoid string allocation
 			actualValue, err := strconv.Unquote(string(recBytes[valueStart : valueStart+length]))
 			if err == nil && value == actualValue {
 				return true
@@ -292,10 +277,8 @@ func hasAttrVal(recBytes []byte, attr, value string) bool {
 }
 
 func parseRecord(recBytes []byte, results *Record) error {
-	if results != nil {
-		if *results == nil {
-			*results = make(Record, 0, 10)
-		}
+	if *results == nil {
+		*results = make(Record, 0, 10)
 	}
 	r := recBytes
 	for len(r) > 0 {
@@ -308,13 +291,10 @@ func parseRecord(recBytes []byte, results *Record) error {
 			continue
 		}
 		tup, n, err := parseTuple(r)
-		if err == nil {
-			if results != nil {
-				*results = append(*results, tup)
-			}
-		} else {
+		if err != nil {
 			return err
 		}
+		*results = append(*results, tup)
 		r = r[n:]
 	}
 	return nil

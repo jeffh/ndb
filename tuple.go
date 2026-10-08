@@ -2,7 +2,6 @@ package ndb
 
 import (
 	"slices"
-	"sort"
 	"strconv"
 	"strings"
 )
@@ -14,39 +13,6 @@ type Tuple struct {
 type Record []Tuple
 
 func (r *Record) zero() { *r = (*r)[:0] }
-
-// MapToRecord converts a map of strings to a Record. The keys of the map are the attributes and the values are the values.
-// Ordering is by sorted keys.
-func MapToRecord(m map[string]string) Record {
-	r := make(Record, 0, len(m))
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	for _, k := range keys {
-		r = append(r, Tuple{k, m[k]})
-	}
-	return r
-}
-
-// MapSliceToRecord converts a map of strings to a Record. The keys of the map are the attributes and the values are the values.
-// Ordering is by sorted keys.
-func MapSliceToRecord(m map[string][]string) Record {
-	r := make(Record, 0, len(m))
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	for _, k := range keys {
-		vs := m[k]
-		for _, v := range vs {
-			r = append(r, Tuple{k, v})
-		}
-	}
-	return r
-}
 
 // MakeRecord creates a Record from a list of attribute-value pairs. The number of arguments must be even.
 func MakeRecord(avPairs ...string) Record {
@@ -60,13 +26,6 @@ func MakeRecord(avPairs ...string) Record {
 		j++
 	}
 	return r
-}
-
-// ParseRecord parses a single record from a string. The string should be a line containing all the attributes and values.
-func ParseRecord(line string) (Record, error) {
-	var results Record
-	err := parseRecord([]byte(line), &results)
-	return results, err
 }
 
 func (r Record) Keys() []string {
@@ -174,13 +133,6 @@ func (r Record) TupleAt(index int) Tuple {
 	return r[index]
 }
 
-// Tuples returns all tuples in the record
-func (r Record) Tuples() []Tuple {
-	tuples := make([]Tuple, len(r))
-	copy(tuples, r)
-	return tuples
-}
-
 // Delete deletes N occurrences of a key.
 // If n=0, then all tuples with the given key are deleted
 func (r *Record) Delete(key string, n int) {
@@ -188,7 +140,6 @@ func (r *Record) Delete(key string, n int) {
 	i := 0
 	for i < len(*r) {
 		if (*r)[i].Attr == key {
-			// Remove this element
 			*r = append((*r)[:i], (*r)[i+1:]...)
 			numDel++
 			if n != 0 && n == numDel {
@@ -214,22 +165,6 @@ func (r *Record) Replace(key, oldValue, newValue string) {
 	}
 }
 
-// ReplaceTimes replaces up to n instances of oldValue with newValue for the given key
-func (r *Record) ReplaceTimes(key, oldValue, newValue string, n int) {
-	if n <= 0 {
-		return
-	}
-	for i := range *r {
-		if (*r)[i].Attr == key && (*r)[i].Val == oldValue {
-			(*r)[i].Val = newValue
-			n--
-			if n == 0 {
-				return
-			}
-		}
-	}
-}
-
 // Put replaces all keys found with the one tuple given
 func (r *Record) Put(t Tuple) {
 	r.Delete(t.Attr, 0)
@@ -246,41 +181,4 @@ func (r Record) Copy() Record {
 	newRecord := make(Record, len(r))
 	copy(newRecord, r)
 	return newRecord
-}
-
-// Equal returns true if two records have the same key-value pairs
-func (r Record) Equal(other Record) bool {
-	if len(r) != len(other) {
-		return false
-	}
-	rMap := r.AsMap()
-	otherMap := other.AsMap()
-
-	if len(rMap) != len(otherMap) {
-		return false
-	}
-
-	for k, v := range rMap {
-		otherV, ok := otherMap[k]
-		if !ok {
-			return false
-		}
-		if len(v) != len(otherV) {
-			return false
-		}
-		// Check all values match (order-independent)
-		for _, val := range v {
-			found := false
-			for _, otherVal := range otherV {
-				if val == otherVal {
-					found = true
-					break
-				}
-			}
-			if !found {
-				return false
-			}
-		}
-	}
-	return true
 }

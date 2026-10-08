@@ -67,40 +67,6 @@ func TestRecordReplace(t *testing.T) {
 	})
 }
 
-func TestRecordReplaceTimes(t *testing.T) {
-	t.Run("replace n times", func(t *testing.T) {
-		r := MakeRecord("name", "John", "name", "John", "name", "John", "age", "30")
-		r.ReplaceTimes("name", "John", "Jane", 2)
-		names := r.GetAll("name")
-		if len(names) != 3 {
-			t.Fatalf("expected 3 names, got %d", len(names))
-		}
-		janeCount := 0
-		johnCount := 0
-		for _, name := range names {
-			if name == "Jane" {
-				janeCount++
-			} else if name == "John" {
-				johnCount++
-			}
-		}
-		if janeCount != 2 {
-			t.Fatalf("expected 2 Janes, got %d", janeCount)
-		}
-		if johnCount != 1 {
-			t.Fatalf("expected 1 John, got %d", johnCount)
-		}
-	})
-
-	t.Run("replace zero times does nothing", func(t *testing.T) {
-		r := MakeRecord("name", "John", "age", "30")
-		r.ReplaceTimes("name", "John", "Jane", 0)
-		if r.Get("name") != "John" {
-			t.Fatalf("expected name to remain John, got %s", r.Get("name"))
-		}
-	})
-}
-
 func TestRecordReplaceAt(t *testing.T) {
 	r := MakeRecord("name", "John", "age", "30")
 	r.ReplaceAt(0, Tuple{"name", "Jane"})
@@ -151,8 +117,7 @@ func TestRecordCopy(t *testing.T) {
 	r := MakeRecord("name", "John", "age", "30")
 	r2 := r.Copy()
 
-	// Verify they're equal
-	if !r.Equal(r2) {
+	if len(r) != len(r2) || r.Get("name") != r2.Get("name") || r.Get("age") != r2.Get("age") {
 		t.Fatalf("expected copy to be equal")
 	}
 
@@ -166,48 +131,6 @@ func TestRecordCopy(t *testing.T) {
 	if r2.Get("name") != "Jane" {
 		t.Fatalf("expected copy to be changed, got %s", r2.Get("name"))
 	}
-}
-
-func TestRecordEqual(t *testing.T) {
-	t.Run("equal records", func(t *testing.T) {
-		r1 := MakeRecord("name", "John", "age", "30")
-		r2 := MakeRecord("name", "John", "age", "30")
-		if !r1.Equal(r2) {
-			t.Fatalf("expected records to be equal")
-		}
-	})
-
-	t.Run("equal records different order", func(t *testing.T) {
-		r1 := MakeRecord("name", "John", "age", "30")
-		r2 := MakeRecord("age", "30", "name", "John")
-		if !r1.Equal(r2) {
-			t.Fatalf("expected records to be equal regardless of order")
-		}
-	})
-
-	t.Run("different values", func(t *testing.T) {
-		r1 := MakeRecord("name", "John", "age", "30")
-		r2 := MakeRecord("name", "Jane", "age", "30")
-		if r1.Equal(r2) {
-			t.Fatalf("expected records to be different")
-		}
-	})
-
-	t.Run("different lengths", func(t *testing.T) {
-		r1 := MakeRecord("name", "John", "age", "30")
-		r2 := MakeRecord("name", "John")
-		if r1.Equal(r2) {
-			t.Fatalf("expected records to be different")
-		}
-	})
-
-	t.Run("multiple values same key", func(t *testing.T) {
-		r1 := MakeRecord("name", "John", "name", "Jane", "age", "30")
-		r2 := MakeRecord("name", "Jane", "name", "John", "age", "30")
-		if !r1.Equal(r2) {
-			t.Fatalf("expected records with same multi-values to be equal")
-		}
-	})
 }
 
 func TestRecordKeys(t *testing.T) {
@@ -296,40 +219,6 @@ func TestRecordAsMap(t *testing.T) {
 	}
 }
 
-func TestMapToRecord(t *testing.T) {
-	m := map[string]string{
-		"name": "John",
-		"age":  "30",
-	}
-	r := MapToRecord(m)
-
-	if len(r) != 2 {
-		t.Fatalf("expected 2 tuples, got %d", len(r))
-	}
-	if r.Get("name") != "John" {
-		t.Fatalf("expected name=John, got %s", r.Get("name"))
-	}
-	if r.Get("age") != "30" {
-		t.Fatalf("expected age=30, got %s", r.Get("age"))
-	}
-}
-
-func TestMapSliceToRecord(t *testing.T) {
-	m := map[string][]string{
-		"name": {"John", "Jane"},
-		"age":  {"30"},
-	}
-	r := MapSliceToRecord(m)
-
-	if len(r) != 3 {
-		t.Fatalf("expected 3 tuples, got %d", len(r))
-	}
-	names := r.GetAll("name")
-	if len(names) != 2 {
-		t.Fatalf("expected 2 names, got %d", len(names))
-	}
-}
-
 func TestMakeRecordPanic(t *testing.T) {
 	defer func() {
 		if r := recover(); r == nil {
@@ -337,44 +226,6 @@ func TestMakeRecordPanic(t *testing.T) {
 		}
 	}()
 	MakeRecord("name", "John", "age")
-}
-
-func TestParseRecord(t *testing.T) {
-	t.Run("simple record", func(t *testing.T) {
-		r, err := ParseRecord("name=John age=30")
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if len(r) != 2 {
-			t.Fatalf("expected 2 tuples, got %d", len(r))
-		}
-		if r.Get("name") != "John" {
-			t.Fatalf("expected name=John, got %s", r.Get("name"))
-		}
-	})
-
-	t.Run("quoted values", func(t *testing.T) {
-		r, err := ParseRecord(`name="John Doe" age=30`)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if r.Get("name") != "John Doe" {
-			t.Fatalf("expected name='John Doe', got %s", r.Get("name"))
-		}
-	})
-
-	t.Run("attribute without value", func(t *testing.T) {
-		r, err := ParseRecord("person name=John")
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if r.Get("person") != "" {
-			t.Fatalf("expected person to have empty value, got %s", r.Get("person"))
-		}
-		if r.Get("name") != "John" {
-			t.Fatalf("expected name=John, got %s", r.Get("name"))
-		}
-	})
 }
 
 func TestRecordString(t *testing.T) {
@@ -408,10 +259,5 @@ func TestRecordIndexAccessors(t *testing.T) {
 	tup := r.TupleAt(1)
 	if tup.Attr != "age" || tup.Val != "30" {
 		t.Fatalf("expected tuple at 1 to be {age 30}, got %+v", tup)
-	}
-
-	tuples := r.Tuples()
-	if len(tuples) != 2 {
-		t.Fatalf("expected 2 tuples, got %d", len(tuples))
 	}
 }

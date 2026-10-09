@@ -4,6 +4,28 @@ import (
 	"testing"
 )
 
+func TestParseOneReportsUnterminatedQuote(t *testing.T) {
+	_, err := ParseOne([]byte(`person name="John`))
+	if err == nil {
+		t.Fatal("expected error for unterminated quote")
+	}
+
+	_, err = ParseOne([]byte("ok=1\nperson name=\"nope"))
+	if err == nil {
+		t.Fatal("expected error when a later record has an unterminated quote")
+	}
+
+	_, err = ParseOne([]byte("\xff\xfe=bad"))
+	if err == nil {
+		t.Fatal("expected error for invalid UTF-8 attribute")
+	}
+
+	_, err = ParseOneString(`person name="John`)
+	if err == nil {
+		t.Fatal("expected ParseOneString error for unterminated quote")
+	}
+}
+
 func TestParseOne(t *testing.T) {
 	t.Run("simple record", func(t *testing.T) {
 		db, err := ParseOne([]byte("person name=John age=30"))
@@ -151,15 +173,10 @@ person name=Jane
 
 func TestParseEdgeCases(t *testing.T) {
 	t.Run("unterminated quote", func(t *testing.T) {
-		data := `person name="John`
-		db, err := ParseOne([]byte(data))
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
+		_, err := ParseOne([]byte(`person name="John`))
+		if err == nil {
+			t.Fatal("expected error for unterminated quote")
 		}
-		// The parser should handle this gracefully, even if not perfectly
-		records := db.AllSlice()
-		// At minimum, it shouldn't crash
-		t.Logf("Found %d records for unterminated quote", len(records))
 	})
 
 	t.Run("unicode characters", func(t *testing.T) {

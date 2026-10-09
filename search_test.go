@@ -1,8 +1,50 @@
 package ndb
 
 import (
+	"strings"
 	"testing"
 )
+
+func TestSearchKeepsLinesOver64KiB(t *testing.T) {
+	longValue := strings.Repeat("a", 70*1024)
+	db, err := ParseOne([]byte("person name=" + longValue))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	records := db.SearchSlice(HasAttr("person"))
+	if len(records) != 1 {
+		t.Fatalf("expected 1 record, got %d", len(records))
+	}
+	if records[0].Get("name") != longValue {
+		t.Fatalf("expected 70KiB value to be preserved")
+	}
+}
+
+func TestSearchFindsRecordAfterOverlongLine(t *testing.T) {
+	longValue := strings.Repeat("a", 70*1024)
+	db, err := ParseOne([]byte("person name=" + longValue + "\nperson name=ok"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	records := db.SearchSlice(HasAttrValue("name", "ok"))
+	if len(records) != 1 {
+		t.Fatalf("expected 1 record after overlong line, got %d", len(records))
+	}
+}
+
+func TestSearchKeepsHashInsideQuotes(t *testing.T) {
+	db, err := ParseOne([]byte(`person name="foo#bar"`))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	records := db.SearchSlice(HasAttr("person"))
+	if len(records) != 1 {
+		t.Fatalf("expected 1 record, got %d", len(records))
+	}
+	if records[0].Get("name") != "foo#bar" {
+		t.Fatalf("expected name=foo#bar, got %s", records[0].Get("name"))
+	}
+}
 
 func TestSearchWithHasAttr(t *testing.T) {
 	m := &MemoryFileSystem{

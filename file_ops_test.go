@@ -49,6 +49,20 @@ func TestDatabaseReferencesWithMissingFiles(t *testing.T) {
 	})
 }
 
+func TestOpenReportsUnterminatedQuote(t *testing.T) {
+	fs := &MemoryFileSystem{
+		Files: map[string]string{
+			"bad.ndb": `person name="John`,
+		},
+	}
+	if _, err := OpenOne(fs, "bad.ndb"); err == nil {
+		t.Fatal("expected OpenOne error for unterminated quote")
+	}
+	if _, err := Open(fs, "bad.ndb"); err == nil {
+		t.Fatal("expected Open error for unterminated quote")
+	}
+}
+
 func TestOpenPanicsWithNilFileSystem(t *testing.T) {
 	defer func() {
 		if r := recover(); r == nil {

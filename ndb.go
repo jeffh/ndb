@@ -298,6 +298,9 @@ func hasAttrVal(recBytes []byte, attr, value string) bool {
 }
 
 func parseRecord(recBytes []byte, results *Record) error {
+	if !utf8.Valid(recBytes) {
+		return fmt.Errorf("invalid utf8 rune")
+	}
 	if *results == nil {
 		*results = make(Record, 0, 10)
 	}

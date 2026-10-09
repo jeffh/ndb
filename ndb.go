@@ -1,7 +1,6 @@
 package ndb
 
 import (
-	"bufio"
 	"bytes"
 	"fmt"
 	"io"
@@ -76,16 +75,32 @@ func OpenOne(sys FileSystem, filepath string) (*Ndb, error) {
 }
 
 func ParseOne(p []byte) (*Ndb, error) {
-	db := &Ndb{
+	if err := validateRecords(p); err != nil {
+		return nil, err
+	}
+	return &Ndb{
 		files: []string{"inline"},
 		data:  [][]byte{p},
 		sys:   nil,
-	}
-	return db, nil
+	}, nil
 }
 
 func ParseOneString(s string) (*Ndb, error) {
 	return ParseOne([]byte(s))
+}
+
+func validateRecords(data []byte) error {
+	var rec Record
+	var firstErr error
+	forEachRawRecord(data, func(recBytes []byte) bool {
+		rec.zero()
+		if err := parseRecord(recBytes, &rec); err != nil {
+			firstErr = err
+			return false
+		}
+		return true
+	})
+	return firstErr
 }
 
 func (n *Ndb) readFile(fileToRead string) ([]byte, error) {
@@ -113,6 +128,9 @@ func (n *Ndb) readFiles(skip int) (int, error) {
 			return count, err
 		}
 		n.data[idx] = buf
+		if err := validateRecords(buf); err != nil {
+			return count, err
+		}
 		count++
 	}
 	return count, nil
@@ -175,55 +193,98 @@ func HasAttrValue(attr, value string) SearchPredicate {
 func (n *Ndb) byPredicate(allow func(rec []byte) bool) iter.Seq[Record] {
 	var results Record
 	return func(yield func(Record) bool) {
-		recBytes := []byte{}
-	loop:
 		for i := range n.data {
-			scanner := bufio.NewScanner(bytes.NewReader(n.data[i]))
-			for scanner.Scan() {
-				line := scanner.Bytes()
-				cIndex := bytes.IndexByte(line, '#')
-				if cIndex != -1 {
-					line = line[:cIndex]
+			cont := true
+			forEachRawRecord(n.data[i], func(recBytes []byte) bool {
+				if !allow(recBytes) {
+					return true
 				}
-				if len(line) == 0 {
-					continue
+				results.zero()
+				if err := parseRecord(recBytes, &results); err != nil {
+					return true
 				}
-				first, _ := utf8.DecodeRune(line)
-
-				if !unicode.IsSpace(first) {
-					if len(recBytes) > 0 {
-						if allow(recBytes) {
-							if err := parseRecord(recBytes, &results); err == nil {
-								if !yield(results) {
-									break loop
-								}
-							}
-						}
-					}
-					results.zero()
-					recBytes = recBytes[:0]
+				if !yield(results) {
+					cont = false
+					return false
 				}
-				line = bytes.TrimSpace(line)
-				if len(line) > 0 {
-					if len(recBytes) == 0 {
-						recBytes = append(recBytes, ' ')
-					}
-					recBytes = append(recBytes, line...)
-					recBytes = append(recBytes, ' ')
-				}
+				return true
+			})
+			if !cont {
+				return
 			}
+		}
+	}
+}
+
+func forEachRawRecord(data []byte, fn func(recBytes []byte) bool) {
+	recBytes := []byte{}
+	for len(data) > 0 {
+		var line []byte
+		if i := bytes.IndexByte(data, '\n'); i >= 0 {
+			line = data[:i]
+			data = data[i+1:]
+		} else {
+			line = data
+			data = nil
+		}
+		if n := len(line); n > 0 && line[n-1] == '\r' {
+			line = line[:n-1]
+		}
+		line = stripComment(line)
+		if len(line) == 0 {
+			continue
+		}
+		first, _ := utf8.DecodeRune(line)
+		if !unicode.IsSpace(first) {
 			if len(recBytes) > 0 {
-				if allow(recBytes) {
-					if err := parseRecord(recBytes, &results); err == nil {
-						if !yield(results) {
-							break
-						}
-					}
+				if !fn(recBytes) {
+					return
 				}
 			}
 			recBytes = recBytes[:0]
 		}
+		line = bytes.TrimSpace(line)
+		if len(line) > 0 {
+			if len(recBytes) == 0 {
+				recBytes = append(recBytes, ' ')
+			}
+			recBytes = append(recBytes, line...)
+			recBytes = append(recBytes, ' ')
+		}
 	}
+	if len(recBytes) > 0 {
+		fn(recBytes)
+	}
+}
+
+func stripComment(line []byte) []byte {
+	inQuote := false
+	escape := false
+	for i := 0; i < len(line); i++ {
+		c := line[i]
+		if inQuote {
+			if escape {
+				escape = false
+				continue
+			}
+			if c == '\\' {
+				escape = true
+				continue
+			}
+			if c == '"' {
+				inQuote = false
+			}
+			continue
+		}
+		if c == '"' {
+			inQuote = true
+			continue
+		}
+		if c == '#' {
+			return line[:i]
+		}
+	}
+	return line
 }
 
 func hasAttr(recBytes []byte, attr string) bool {
@@ -291,13 +352,7 @@ func parseTuple(p []byte) (Tuple, int, error) {
 		valueStart := end + 1
 		firstValue, _ := utf8.DecodeRune(p[valueStart:])
 		if firstValue == '"' {
-			length := bytes.IndexAny(p[valueStart+1:], "\"")
-			if length == -1 {
-				length = len(p) - valueStart
-			} else {
-				length += 2 // 1 for starting quote, and 1 for ending quote
-			}
-
+			length := quotedValueLen(p[valueStart:])
 			actualValue, err := strconv.Unquote(string(p[valueStart : valueStart+length]))
 			if err != nil {
 				return Tuple{}, valueStart + length, err
@@ -312,6 +367,25 @@ func parseTuple(p []byte) (Tuple, int, error) {
 			return Tuple{attr, string(p[valueStart : valueStart+length])}, valueStart + length, nil
 		}
 	}
+}
+
+func quotedValueLen(p []byte) int {
+	escape := false
+	for i := 1; i < len(p); i++ {
+		c := p[i]
+		if escape {
+			escape = false
+			continue
+		}
+		if c == '\\' {
+			escape = true
+			continue
+		}
+		if c == '"' {
+			return i + 1
+		}
+	}
+	return len(p)
 }
 
 func toSlice(it iter.Seq[Record]) []Record {

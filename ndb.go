@@ -1,7 +1,6 @@
 package ndb
 
 import (
-	"bufio"
 	"bytes"
 	"fmt"
 	"io"
@@ -76,16 +75,32 @@ func OpenOne(sys FileSystem, filepath string) (*Ndb, error) {
 }
 
 func ParseOne(p []byte) (*Ndb, error) {
-	db := &Ndb{
+	if err := validateRecords(p); err != nil {
+		return nil, err
+	}
+	return &Ndb{
 		files: []string{"inline"},
 		data:  [][]byte{p},
 		sys:   nil,
-	}
-	return db, nil
+	}, nil
 }
 
 func ParseOneString(s string) (*Ndb, error) {
 	return ParseOne([]byte(s))
+}
+
+func validateRecords(data []byte) error {
+	var rec Record
+	var firstErr error
+	forEachRawRecord(data, func(recBytes []byte, startLine int) bool {
+		rec.zero()
+		if err := parseRecord(recBytes, &rec); err != nil {
+			firstErr = fmt.Errorf("line %d: %w", startLine, err)
+			return false
+		}
+		return true
+	})
+	return firstErr
 }
 
 func (n *Ndb) readFile(fileToRead string) ([]byte, error) {
@@ -175,54 +190,81 @@ func HasAttrValue(attr, value string) SearchPredicate {
 func (n *Ndb) byPredicate(allow func(rec []byte) bool) iter.Seq[Record] {
 	var results Record
 	return func(yield func(Record) bool) {
-		recBytes := []byte{}
-	loop:
 		for i := range n.data {
-			scanner := bufio.NewScanner(bytes.NewReader(n.data[i]))
-			for scanner.Scan() {
-				line := scanner.Bytes()
-				cIndex := bytes.IndexByte(line, '#')
-				if cIndex != -1 {
-					line = line[:cIndex]
+			cont := true
+			forEachRawRecord(n.data[i], func(recBytes []byte, _ int) bool {
+				if !allow(recBytes) {
+					return true
 				}
-				if len(line) == 0 {
-					continue
-				}
-				first, _ := utf8.DecodeRune(line)
-
-				if !unicode.IsSpace(first) {
-					if len(recBytes) > 0 {
-						if allow(recBytes) {
-							if err := parseRecord(recBytes, &results); err == nil {
-								if !yield(results) {
-									break loop
-								}
-							}
-						}
+				results.zero()
+				if err := parseRecord(recBytes, &results); err == nil {
+					if !yield(results) {
+						cont = false
+						return false
 					}
-					results.zero()
-					recBytes = recBytes[:0]
 				}
-				line = bytes.TrimSpace(line)
-				if len(line) > 0 {
-					if len(recBytes) == 0 {
-						recBytes = append(recBytes, ' ')
-					}
-					recBytes = append(recBytes, line...)
-					recBytes = append(recBytes, ' ')
-				}
+				return true
+			})
+			if !cont {
+				return
 			}
+		}
+	}
+}
+
+func forEachLine(data []byte, fn func(line []byte, lineNo int) bool) {
+	lineNo := 1
+	for len(data) > 0 {
+		line, rest, found := bytes.Cut(data, []byte{'\n'})
+		if n := len(line); n > 0 && line[n-1] == '\r' {
+			line = line[:n-1]
+		}
+		if !fn(line, lineNo) {
+			return
+		}
+		if !found {
+			return
+		}
+		data = rest
+		lineNo++
+	}
+}
+
+func forEachRawRecord(data []byte, fn func(rec []byte, startLine int) bool) {
+	recBytes := []byte{}
+	startLine := 0
+	stopped := false
+	forEachLine(data, func(line []byte, lineNo int) bool {
+		if i := bytes.IndexByte(line, '#'); i != -1 {
+			line = line[:i]
+		}
+		if len(line) == 0 {
+			return true
+		}
+		first, _ := utf8.DecodeRune(line)
+		if !unicode.IsSpace(first) {
 			if len(recBytes) > 0 {
-				if allow(recBytes) {
-					if err := parseRecord(recBytes, &results); err == nil {
-						if !yield(results) {
-							break
-						}
-					}
+				if !fn(recBytes, startLine) {
+					stopped = true
+					return false
 				}
 			}
 			recBytes = recBytes[:0]
+			startLine = lineNo
 		}
+		line = bytes.TrimSpace(line)
+		if len(line) > 0 {
+			if len(recBytes) == 0 {
+				recBytes = append(recBytes, ' ')
+				startLine = lineNo
+			}
+			recBytes = append(recBytes, line...)
+			recBytes = append(recBytes, ' ')
+		}
+		return true
+	})
+	if !stopped && len(recBytes) > 0 {
+		fn(recBytes, startLine)
 	}
 }
 

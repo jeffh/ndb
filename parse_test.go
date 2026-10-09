@@ -1,7 +1,9 @@
 package ndb
 
 import (
+	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestParseOne(t *testing.T) {
@@ -151,15 +153,65 @@ person name=Jane
 
 func TestParseEdgeCases(t *testing.T) {
 	t.Run("unterminated quote", func(t *testing.T) {
-		data := `person name="John`
-		db, err := ParseOne([]byte(data))
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
+		_, err := ParseOne([]byte(`person name="John`))
+		if err == nil {
+			t.Fatal("expected error for unterminated quote")
 		}
-		// The parser should handle this gracefully, even if not perfectly
-		records := db.AllSlice()
-		// At minimum, it shouldn't crash
-		t.Logf("Found %d records for unterminated quote", len(records))
+		if !strings.Contains(err.Error(), "line 1") {
+			t.Fatalf("expected line number in error, got %v", err)
+		}
+	})
+
+	t.Run("unterminated quote drops tail", func(t *testing.T) {
+		_, err := ParseOne([]byte("ok=1\nperson name=\"nope"))
+		if err == nil {
+			t.Fatal("expected error for unterminated quote after a valid record")
+		}
+		if !strings.Contains(err.Error(), "line 2") {
+			t.Fatalf("expected line 2 in error, got %v", err)
+		}
+	})
+
+	t.Run("unterminated quote via ParseOneString", func(t *testing.T) {
+		_, err := ParseOneString(`person name="John`)
+		if err == nil {
+			t.Fatal("expected error for unterminated quote")
+		}
+	})
+
+	t.Run("invalid utf8 in value", func(t *testing.T) {
+		data := append([]byte("person name="), 0xff)
+		if utf8.Valid(data) {
+			t.Fatal("precondition failed: test data is valid utf8")
+		}
+		_, err := ParseOne(data)
+		if err == nil {
+			t.Fatal("expected error for invalid utf8")
+		}
+		if !strings.Contains(err.Error(), "line 1") {
+			t.Fatalf("expected line number in error, got %v", err)
+		}
+	})
+
+	t.Run("invalid utf8 after valid record", func(t *testing.T) {
+		data := append([]byte("ok=1\nperson name="), 0x80)
+		if utf8.Valid(data) {
+			t.Fatal("precondition failed: test data is valid utf8")
+		}
+		_, err := ParseOne(data)
+		if err == nil {
+			t.Fatal("expected error for invalid utf8")
+		}
+		if !strings.Contains(err.Error(), "line 2") {
+			t.Fatalf("expected line 2 in error, got %v", err)
+		}
+	})
+
+	t.Run("invalid utf8 via ParseOneString", func(t *testing.T) {
+		_, err := ParseOneString("person name=" + string([]byte{0xff}))
+		if err == nil {
+			t.Fatal("expected error for invalid utf8")
+		}
 	})
 
 	t.Run("unicode characters", func(t *testing.T) {
@@ -181,10 +233,7 @@ func TestParseEdgeCases(t *testing.T) {
 	})
 
 	t.Run("very long line", func(t *testing.T) {
-		longValue := ""
-		for i := 0; i < 1000; i++ {
-			longValue += "a"
-		}
+		longValue := strings.Repeat("a", 1000)
 		data := `person name=` + longValue
 		db, err := ParseOne([]byte(data))
 		if err != nil {
@@ -196,6 +245,38 @@ func TestParseEdgeCases(t *testing.T) {
 		}
 		if records[0].Get("name") != longValue {
 			t.Fatalf("expected long value to be preserved")
+		}
+	})
+
+	t.Run("70KiB value is found", func(t *testing.T) {
+		longValue := strings.Repeat("x", 70*1024)
+		db, err := ParseOne([]byte("person name=" + longValue))
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		records := db.SearchSlice(HasAttr("person"))
+		if len(records) != 1 {
+			t.Fatalf("expected 1 record, got %d", len(records))
+		}
+		if records[0].Get("name") != longValue {
+			t.Fatalf("expected 70KiB value to be preserved")
+		}
+	})
+
+	t.Run("record after overlong line is found", func(t *testing.T) {
+		longValue := strings.Repeat("y", 70*1024)
+		data := "person name=" + longValue + "\nperson name=Jane"
+		db, err := ParseOne([]byte(data))
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		jane := db.SearchSlice(HasAttrValue("name", "Jane"))
+		if len(jane) != 1 {
+			t.Fatalf("expected to find record after overlong line, got %d", len(jane))
+		}
+		all := db.SearchSlice(HasAttr("person"))
+		if len(all) != 2 {
+			t.Fatalf("expected 2 records, got %d", len(all))
 		}
 	})
 

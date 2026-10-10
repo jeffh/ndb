@@ -63,6 +63,9 @@ jobs:
             lscpu | awk -F: '/Model name/ {gsub(/^[ \t]+/, "", $2); print "# model="$2; exit}'
             go test -run '^$' -bench . -benchmem -count="$BENCH_COUNT" -benchtime="$BENCH_TIME"
           } | tee tmp/bench/bench.txt
+          # Same benches with the archsimd scanners compiled in.
+          GOEXPERIMENT=simd go test -run '^$' -bench . -benchmem -count="$BENCH_COUNT" -benchtime="$BENCH_TIME" \
+            | tee tmp/bench/bench-simd.txt
 
       - name: Publish summary
         if: always()
@@ -83,6 +86,16 @@ jobs:
               echo "(no bench output)"
             fi
             echo '```'
+            echo
+            echo "### GOEXPERIMENT=simd"
+            echo
+            echo '```'
+            if [[ -f tmp/bench/bench-simd.txt ]]; then
+              cat tmp/bench/bench-simd.txt
+            else
+              echo "(no bench output)"
+            fi
+            echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload bench.txt
@@ -90,5 +103,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: bench-results
-          path: tmp/bench/bench.txt
+          path: tmp/bench/bench*.txt
           if-no-files-found: warn

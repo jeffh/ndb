@@ -7,6 +7,7 @@ import (
 	"iter"
 	"slices"
 	"strconv"
+	"strings"
 	"unicode"
 	"unicode/utf8"
 	"unsafe"
@@ -93,8 +94,10 @@ func ParseOne(p []byte) (*Ndb, error) {
 		return nil, err
 	}
 	return &Ndb{
-		files:       []string{"inline"},
-		data:        [][]byte{p},
+		files: []string{"inline"},
+		// Clip capacity: SIMD scanners may read (and mask off) bytes up to
+		// cap, and the caller still owns anything past len(p).
+		data:        [][]byte{p[:len(p):len(p)]},
 		sys:         nil,
 		copyStrings: true,
 	}, nil
@@ -157,7 +160,7 @@ func (n *Ndb) readFiles(skip int) (int, error) {
 //
 // Use Search to find matching records instead.
 func (n *Ndb) All() iter.Seq[Record] {
-	return n.byPredicate(nil)
+	return n.byPredicate(nil, rawFilter{})
 }
 
 // AllSlice returns a slice of all records in the database. This isn't
@@ -179,7 +182,13 @@ func (n *Ndb) First(attr, val string) Record {
 // beyond the current step.
 func (n *Ndb) Search(preds ...SearchPredicate) iter.Seq[Record] {
 	if len(preds) == 0 {
-		return n.byPredicate(nil)
+		return n.byPredicate(nil, rawFilter{})
+	}
+	var filter rawFilter
+	for _, pred := range preds {
+		if f := pred.rawFilter(); len(f.needle) > len(filter.needle) {
+			filter = f
+		}
 	}
 	return n.byPredicate(func(lines [][]byte) bool {
 		for _, pred := range preds {
@@ -188,13 +197,24 @@ func (n *Ndb) Search(preds ...SearchPredicate) iter.Seq[Record] {
 			}
 		}
 		return true
-	})
+	}, filter)
 }
 
 // SearchPredicate selects records during Search. The interface is sealed:
 // only predicates from this package (HasAttr, HasAttrValue) implement it.
 type SearchPredicate interface {
 	matchLines(lines [][]byte) bool
+	rawFilter() rawFilter
+}
+
+// rawFilter is a necessary condition on a record's raw file text: a record
+// can only match if its text contains needle, or a '\\' when
+// stopAtBackslash is set. Search uses it to jump between candidate records
+// with one vectorized scan instead of splitting and testing every record.
+// A zero rawFilter (no needle) disables skipping.
+type rawFilter struct {
+	needle          []byte
+	stopAtBackslash bool
 }
 
 type attrPred struct {
@@ -202,6 +222,24 @@ type attrPred struct {
 	sp     []byte // " attr "
 	val    string
 	hasVal bool
+}
+
+// rawFilter picks the longer of the attribute name and the value as the
+// needle. Both are sound only when they hold no ' ': matching runs on
+// trimmed lines, and the multi-line paths join those lines with a single
+// space, so a space-free attr= or value always lies inside one line and
+// therefore inside the raw record text. A value can also be spelled with
+// escapes inside quotes ("\x62" is "b"), which only parse with a '\\' in
+// the record, so a value needle also stops at backslashes.
+func (p attrPred) rawFilter() rawFilter {
+	attr := p.eq[1 : len(p.eq)-1]
+	if bytes.IndexByte(attr, ' ') >= 0 {
+		attr = nil
+	}
+	if p.hasVal && len(p.val) > len(attr) && strings.IndexByte(p.val, ' ') < 0 {
+		return rawFilter{needle: []byte(p.val), stopAtBackslash: true}
+	}
+	return rawFilter{needle: attr}
 }
 
 func (p attrPred) matchLines(lines [][]byte) bool {
@@ -232,13 +270,13 @@ func HasAttrValue(attr, value string) SearchPredicate {
 	}
 }
 
-func (n *Ndb) byPredicate(allow func(lines [][]byte) bool) iter.Seq[Record] {
+func (n *Ndb) byPredicate(allow func(lines [][]byte) bool, filter rawFilter) iter.Seq[Record] {
 	copyStr := n.copyStrings
 	return func(yield func(Record) bool) {
 		var results Record
 		for i := range n.data {
 			cont := true
-			forEachRecordLines(n.data[i], func(lines [][]byte, _ int) bool {
+			fn := func(lines [][]byte, _ int) bool {
 				if allow != nil && !allow(lines) {
 					return true
 				}
@@ -250,12 +288,123 @@ func (n *Ndb) byPredicate(allow func(lines [][]byte) bool) iter.Seq[Record] {
 					}
 				}
 				return true
-			})
+			}
+			if len(filter.needle) == 0 {
+				forEachRecordLines(n.data[i], fn)
+			} else {
+				forEachCandidateRecordLines(n.data[i], filter, fn)
+			}
 			if !cont {
 				return
 			}
 		}
 	}
+}
+
+// forEachCandidateRecordLines behaves like forEachRecordLines restricted to
+// records whose lines can satisfy filter. It finds the next filter hit with
+// indexCandidate, backs up to the record containing it, and walks records
+// from there as usual. While hits keep landing in each record the walk just
+// streams; once the next hit lies past the current record, the walk jumps
+// ahead to the hit's record, so records in between are never split into
+// lines. startLine is not tracked (callers here ignore it).
+func forEachCandidateRecordLines(data []byte, filter rawFilter, fn func(lines [][]byte, startLine int) bool) {
+	if len(data) == 0 {
+		return
+	}
+	base := uintptr(unsafe.Pointer(unsafe.SliceData(data)))
+	offset := func(p []byte) int { return int(uintptr(unsafe.Pointer(unsafe.SliceData(p))) - base) }
+	find := func(from int) int {
+		i := indexCandidate(data[from:], filter.needle, filter.stopAtBackslash)
+		if i < 0 {
+			return -1
+		}
+		return from + i
+	}
+
+	// pos is 0 or the end of a record's last line. Walking from either
+	// splits records exactly as walking from 0 does: the rest of that line
+	// and any lines up to the next record are blank or comment-only.
+	pos := 0
+	hit := find(0)
+	// When hits land in record after record, searching ahead from every
+	// record costs more than it saves. dense counts records to hand to fn
+	// without searching; it doubles (up to maxDense) each time a search
+	// lands in the current record and resets once a search skips ahead.
+	const maxDense = 32
+	dense, nextDense := 0, 1
+	for hit >= 0 {
+		jump := false
+		stopped := false
+		start := recordStartAtOrBefore(data, pos, hit)
+		forEachRecordLines(data[start:], func(lines [][]byte, startLine int) bool {
+			last := lines[len(lines)-1]
+			rs, re := offset(lines[0]), offset(last)+len(last)
+			if hit < rs {
+				if dense > 0 {
+					dense--
+					if !fn(lines, startLine) {
+						stopped = true
+						return false
+					}
+					return true
+				}
+				if hit = find(rs); hit < 0 {
+					stopped = true
+					return false
+				}
+				if hit < re {
+					dense = nextDense
+					nextDense = min(2*nextDense, maxDense)
+				} else {
+					nextDense = 1
+				}
+			}
+			if hit >= re {
+				// No hit inside this record's lines: skip it and
+				// everything up to the record holding the hit.
+				pos = re
+				jump = true
+				return false
+			}
+			if !fn(lines, startLine) {
+				stopped = true
+				return false
+			}
+			return true
+		})
+		if stopped || !jump {
+			return
+		}
+	}
+}
+
+// isRecordStartLine reports whether the line beginning at data[0] opens a
+// new record in forEachRecordLines: it is not blank after comment stripping
+// and does not begin with whitespace.
+func isRecordStartLine(data []byte) bool {
+	line := data
+	if i := bytes.IndexByte(line, '\n'); i >= 0 {
+		line = line[:i]
+	}
+	if n := len(line); n > 0 && line[n-1] == '\r' {
+		line = line[:n-1]
+	}
+	line = stripComment(line)
+	return len(bytes.TrimSpace(line)) > 0 && isRecordStart(line)
+}
+
+// recordStartAtOrBefore returns the start of the line that opens the record
+// containing data[i], or lo if no record-start line lies in (lo, i].
+func recordStartAtOrBefore(data []byte, lo, i int) int {
+	ls := lo + bytes.LastIndexByte(data[lo:i], '\n') + 1
+	for ls > lo {
+		if isRecordStartLine(data[ls:]) {
+			return ls
+		}
+		ls = lo + bytes.LastIndexByte(data[lo:ls-1], '\n') + 1
+	}
+	return lo
 }
 
 func forEachLine(data []byte, fn func(line []byte, lineNo int) bool) {
@@ -705,33 +854,6 @@ func cloneString(b []byte, copyStr bool) string {
 		return string(b)
 	}
 	return unsafe.String(unsafe.SliceData(b), len(b))
-}
-
-func indexByte4(p []byte, a, b, c, d byte) int {
-	for i, x := range p {
-		if x == a || x == b || x == c || x == d {
-			return i
-		}
-	}
-	return -1
-}
-
-func indexByte5(p []byte, a, b, c, d, e byte) int {
-	for i, x := range p {
-		if x == a || x == b || x == c || x == d || x == e {
-			return i
-		}
-	}
-	return -1
-}
-
-func indexByte6(p []byte, a, b, c, d, e, f byte) int {
-	for i, x := range p {
-		if x == a || x == b || x == c || x == d || x == e || x == f {
-			return i
-		}
-	}
-	return -1
 }
 
 // quotedValueLen returns the length of a strconv-quoted value starting at p,

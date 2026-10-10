@@ -400,6 +400,82 @@ func TestParseMultilineQuotedValue(t *testing.T) {
 	}
 }
 
+func TestParseQuotedValueSpanningThreeLines(t *testing.T) {
+	in := "k=\"a\n\tb\n\tc\"\n"
+	db, err := ParseOne([]byte(in))
+	if err != nil {
+		t.Fatalf("ParseOne 3-line quote: %v", err)
+	}
+	recs := db.AllSlice()
+	if len(recs) != 1 {
+		t.Fatalf("expected 1 record, got %d (%v)", len(recs), recs)
+	}
+	if recs[0].Get("k") != "a b c" {
+		t.Fatalf("k=%q want %q", recs[0].Get("k"), "a b c")
+	}
+	if got := db.SearchSlice(HasAttrValue("k", "a b c")); len(got) != 1 {
+		t.Fatalf("HasAttrValue missed 3-line quoted value, got %d", len(got))
+	}
+}
+
+func TestParseQuotedValueEscapedQuoteThenContinuation(t *testing.T) {
+	in := "k=\"abc\\\"\n\tmore\"\n"
+	db, err := ParseOne([]byte(in))
+	if err != nil {
+		t.Fatalf("ParseOne escaped quote + continuation: %v", err)
+	}
+	recs := db.AllSlice()
+	if len(recs) != 1 {
+		t.Fatalf("expected 1 record, got %d", len(recs))
+	}
+	want := `abc" more`
+	if recs[0].Get("k") != want {
+		t.Fatalf("k=%q want %q", recs[0].Get("k"), want)
+	}
+	if got := db.SearchSlice(HasAttrValue("k", want)); len(got) != 1 {
+		t.Fatalf("HasAttrValue missed escaped-quote continuation, got %d", len(got))
+	}
+}
+
+func TestParseQuotedValueCRLFMultiline(t *testing.T) {
+	in := "k=\"a\r\n\tb\r\n\tc\"\r\n"
+	db, err := ParseOne([]byte(in))
+	if err != nil {
+		t.Fatalf("ParseOne CRLF multiline quote: %v", err)
+	}
+	recs := db.AllSlice()
+	if len(recs) != 1 {
+		t.Fatalf("expected 1 record, got %d", len(recs))
+	}
+	if recs[0].Get("k") != "a b c" {
+		t.Fatalf("k=%q want %q", recs[0].Get("k"), "a b c")
+	}
+	if got := db.SearchSlice(HasAttrValue("k", "a b c")); len(got) != 1 {
+		t.Fatalf("HasAttrValue missed CRLF multiline quote, got %d", len(got))
+	}
+}
+
+func TestQuoteClosed(t *testing.T) {
+	cases := []struct {
+		in   string
+		want bool
+	}{
+		{`"abc"`, true},
+		{`"abc`, false},
+		{`"abc\"`, false},
+		{`"abc\\"`, true},
+		{`"abc\"more"`, true},
+		{`"`, false},
+		{``, false},
+		{`abc"`, false},
+	}
+	for _, tc := range cases {
+		if got := quoteClosed([]byte(tc.in)); got != tc.want {
+			t.Fatalf("quoteClosed(%q)=%v want %v", tc.in, got, tc.want)
+		}
+	}
+}
+
 func TestParseKeepsInchMarkOutsideQuotes(t *testing.T) {
 	cases := []struct {
 		name string

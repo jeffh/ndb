@@ -32,6 +32,10 @@ type Ndb struct {
 // ```
 // database file="other.ndb" file="another.ndb" file="more.ndb"
 // ```
+//
+// Attribute and value strings from Search/All may alias the in-memory file
+// buffer. They stay valid after iteration, but keeping those strings alive
+// also keeps the whole file buffer alive.
 func Open(sys FileSystem, filepath string) (*Ndb, error) {
 	if sys == nil {
 		panic("sys is required")
@@ -65,6 +69,10 @@ func Open(sys FileSystem, filepath string) (*Ndb, error) {
 
 // OpenOne opens a single file and returns a database. It will not recursively
 // open other database references.
+//
+// Attribute and value strings from Search/All may alias the in-memory file
+// buffer. They stay valid after iteration, but keeping those strings alive
+// also keeps the whole file buffer alive.
 func OpenOne(sys FileSystem, filepath string) (*Ndb, error) {
 	if sys == nil {
 		panic("sys is required")
@@ -423,7 +431,7 @@ func hasAttrValLines(lines [][]byte, attrEq, attrSp []byte, value string) bool {
 			if n <= 0 {
 				break
 			}
-			from = idx + 1
+			from = idx + n
 		}
 	}
 	if len(value) == 0 {
@@ -497,8 +505,31 @@ func needJoinForQuote(p []byte) bool {
 	if vs >= len(p) || p[vs] != '"' {
 		return false
 	}
-	q := p[vs:]
-	return quotedValueLen(q) == len(q) && (len(q) < 2 || q[len(q)-1] != '"')
+	return !quoteClosed(p[vs:])
+}
+
+// quoteClosed reports whether p starts with '"' and contains an escape-aware
+// closing quote. A trailing \" is not a closer.
+func quoteClosed(p []byte) bool {
+	if len(p) == 0 || p[0] != '"' {
+		return false
+	}
+	escape := false
+	for i := 1; i < len(p); i++ {
+		c := p[i]
+		if escape {
+			escape = false
+			continue
+		}
+		if c == '\\' {
+			escape = true
+			continue
+		}
+		if c == '"' {
+			return true
+		}
+	}
+	return false
 }
 
 func joinFrom(lines [][]byte, idx int) []byte {
@@ -549,13 +580,13 @@ func parseRecordLines(lines [][]byte, results *Record, copyStr bool) error {
 					continue
 				}
 			}
-			if leftover == nil && needJoinForQuote(p) && i+1 < len(lines) {
+			if needJoinForQuote(p) && i+1 < len(lines) {
 				leftover = append(leftover[:0], p...)
 				break
 			}
 			tup, n, err := parseTuple(p, copyStr)
 			if err != nil {
-				if leftover == nil && i+1 < len(lines) {
+				if i+1 < len(lines) {
 					leftover = append(leftover[:0], p...)
 					break
 				}
@@ -564,40 +595,6 @@ func parseRecordLines(lines [][]byte, results *Record, copyStr bool) error {
 			*results = append(*results, tup)
 			p = p[n:]
 			leftover = nil
-		}
-	}
-	if leftover != nil {
-		if !utf8.Valid(leftover) {
-			return fmt.Errorf("invalid utf8 rune")
-		}
-		tup, n, err := parseTuple(leftover, true)
-		if err != nil {
-			return err
-		}
-		*results = append(*results, tup)
-		rest := leftover[n:]
-		for len(rest) > 0 {
-			if rest[0] < utf8.RuneSelf {
-				if isASCIISpace(rest[0]) {
-					rest = rest[1:]
-					continue
-				}
-			} else {
-				ch, size := utf8.DecodeRune(rest)
-				if ch == utf8.RuneError {
-					return fmt.Errorf("invalid utf8 rune")
-				}
-				if unicode.IsSpace(ch) {
-					rest = rest[size:]
-					continue
-				}
-			}
-			tup, n, err := parseTuple(rest, true)
-			if err != nil {
-				return err
-			}
-			*results = append(*results, tup)
-			rest = rest[n:]
 		}
 	}
 	return nil

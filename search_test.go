@@ -369,6 +369,19 @@ func TestParseOneHeldRecordIndependentOfInputMutation(t *testing.T) {
 	}
 }
 
+func TestHasAttrValueDoesNotScanInsideParsedValue(t *testing.T) {
+	db, err := ParseOneString(`a="x a=1 "`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := db.SearchSlice(HasAttrValue("a", "1")); len(got) != 0 {
+		t.Fatalf("HasAttrValue(a, 1) should not match inside quoted value, got %d", len(got))
+	}
+	if got := db.SearchSlice(HasAttrValue("a", "x a=1 ")); len(got) != 1 {
+		t.Fatalf("HasAttrValue(a, exact quoted value) got %d", len(got))
+	}
+}
+
 func TestHasAttrMatchesQuotedValueContains(t *testing.T) {
 	db, err := ParseOneString(`note=" sys=foo " extra=1`)
 	if err != nil {

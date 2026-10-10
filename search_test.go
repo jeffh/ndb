@@ -369,6 +369,26 @@ func TestParseOneHeldRecordIndependentOfInputMutation(t *testing.T) {
 	}
 }
 
+func TestHasAttrValueFindsTupleAfterFalseJoin(t *testing.T) {
+	// needJoinForQuote can see `a="` inside the already-closed k="x a=".
+	// That is not a real opening quote; the next line is its own tuple.
+	in := "k=\"x a=\"\n\ta=real\n"
+	db, err := ParseOne([]byte(in))
+	if err != nil {
+		t.Fatal(err)
+	}
+	recs := db.AllSlice()
+	if len(recs) != 1 || recs[0].Get("k") != "x a=" || recs[0].Get("a") != "real" {
+		t.Fatalf("parse: %+v", recs)
+	}
+	if got := db.SearchSlice(HasAttrValue("a", "real")); len(got) != 1 {
+		t.Fatalf("HasAttrValue(a, real) should find the later tuple, got %d", len(got))
+	}
+	if got := db.SearchSlice(HasAttrValue("k", "x a=")); len(got) != 1 {
+		t.Fatalf("HasAttrValue(k, x a=) got %d", len(got))
+	}
+}
+
 func TestHasAttrValueDoesNotRescanContinuationInsideMultilineQuote(t *testing.T) {
 	in := "ip=\"a\n\tip=1 b\"\n"
 	db, err := ParseOne([]byte(in))

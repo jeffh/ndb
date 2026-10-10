@@ -271,6 +271,29 @@ func recordEqual(a, b Record) bool {
 	return true
 }
 
+func recordHasAttrValue(r Record, attr, val string) bool {
+	for _, t := range r {
+		if t.Attr == attr && t.Val == val {
+			return true
+		}
+	}
+	return false
+}
+
+func extrasHaveParsedAttrValue(got, want []Record, attr, val string) bool {
+	i := 0
+	for _, g := range got {
+		if i < len(want) && recordEqual(g, want[i]) {
+			i++
+			continue
+		}
+		if !recordHasAttrValue(g, attr, val) {
+			return false
+		}
+	}
+	return i == len(want)
+}
+
 // recordsSuperset reports whether got contains every record in want, in order.
 func recordsSuperset(got, want []Record) bool {
 	i := 0
@@ -323,16 +346,24 @@ func compareAgainstMain(t *testing.T, in []byte) {
 			if recordsEqual(gotHits, wantHits) {
 				continue
 			}
-			if val == "" && recordsSuperset(gotHits, wantHits) {
-				// Intentional: when value is empty, main can skip the
-				// bare-attr Contains(" x ") check after it lands on
-				// " x=" inside a quoted value and treats a later quote
-				// as opening a new one. Head still runs that check.
-				// Head is right when a real bare attr exists
-				// (`ip k=" ip="` → main 0, head 1), but it can also
-				// match text inside a quoted value (`="0 1 1="`), the
-				// same Contains quirk HasAttr already has.
-				continue
+			if recordsSuperset(gotHits, wantHits) {
+				if val == "" {
+					// Intentional: when value is empty, main can skip the
+					// bare-attr Contains(" x ") check after it lands on
+					// " x=" inside a quoted value and treats a later quote
+					// as opening a new one. Head still runs that check.
+					// Head is right when a real bare attr exists
+					// (`ip k=" ip="` → main 0, head 1), but it can also
+					// match text inside a quoted value (`="0 1 1="`), the
+					// same Contains quirk HasAttr already has.
+					continue
+				}
+				if extrasHaveParsedAttrValue(gotHits, wantHits, attr, val) {
+					// Head found a later real tuple that main's concat
+					// scan missed after treating attr=" inside a closed
+					// quote as an opening quote (k="x a=" / a=real).
+					continue
+				}
 			}
 			t.Fatalf("HasAttrValue(%q,%q) for %q\n got %v\nwant %v", attr, val, in, gotHits, wantHits)
 		}
@@ -392,6 +423,7 @@ func TestCompatVsMainSeeded(t *testing.T) {
 		"ip=\"a\n\tip=1 b\"\n",
 		`="0 1 1="`,
 		`ip k=" ip="`,
+		"k=\"x a=\"\n\ta=real\n",
 	}
 	for i, s := range seeds {
 		t.Run(fmt.Sprintf("seed%d", i), func(t *testing.T) {
@@ -417,6 +449,7 @@ func FuzzParseCompat(f *testing.F) {
 		"ip=\"a\n\tip=1 b\"\n",
 		`="0 1 1="`,
 		`ip k=" ip="`,
+		"k=\"x a=\"\n\ta=real\n",
 	} {
 		f.Add(s)
 	}

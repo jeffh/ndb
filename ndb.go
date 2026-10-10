@@ -152,6 +152,9 @@ func (n *Ndb) readFiles(skip int) (int, error) {
 // This isn't particularly efficient to use in production, but may be useful when
 // debugging issues.
 //
+// The Record yielded on each iteration is reused; call Record.Copy to retain it
+// beyond the current step.
+//
 // Use Search to find matching records instead.
 func (n *Ndb) All() iter.Seq[Record] {
 	return n.byPredicate(nil)
@@ -172,6 +175,8 @@ func (n *Ndb) First(attr, val string) Record {
 }
 
 // Search returns an iterator that yields records matching the given predicates.
+// The Record yielded on each iteration is reused; call Record.Copy to retain it
+// beyond the current step.
 func (n *Ndb) Search(preds ...SearchPredicate) iter.Seq[Record] {
 	if len(preds) == 0 {
 		return n.byPredicate(nil)
@@ -418,10 +423,14 @@ func hasAttrValLines(lines [][]byte, attrEq, attrSp []byte, value string) bool {
 			}
 			p := line[idx:]
 			if needJoinForQuote(p) && i+1 < len(lines) {
-				// A quote continues onto later lines. Join the whole
-				// record and use the concat scanner so later lines that
-				// belong to this value are not searched as new tuples.
-				return hasAttrValKeys(joinFrom(lines, 0), attrEq, attrSp, value)
+				// Only join when this hit is a real tuple start. An
+				// `attr="` substring inside an already-closed quote is
+				// not a new opening quote; skip it and keep scanning.
+				if isTupleStart(line, idx) {
+					return hasAttrValKeys(joinFrom(lines, 0), attrEq, attrSp, value)
+				}
+				from = idx + 1
+				continue
 			}
 			tup, n, err := parseTuple(p, false)
 			if err == nil && tup.Val == value {
@@ -496,7 +505,7 @@ func indexFramed(line, key []byte, from int) int {
 }
 
 func needJoinForQuote(p []byte) bool {
-	end := indexByte4(p, '=', ' ', '\t', '\n')
+	end := indexByte5(p, '=', ' ', '\t', '\r', '\n')
 	if end < 0 || p[end] != '=' {
 		return false
 	}
@@ -547,53 +556,132 @@ func joinFrom(lines [][]byte, idx int) []byte {
 	return buf
 }
 
+func skipLeadingSpace(p []byte) ([]byte, error) {
+	for len(p) > 0 {
+		if p[0] < utf8.RuneSelf {
+			if isASCIISpace(p[0]) {
+				p = p[1:]
+				continue
+			}
+			return p, nil
+		}
+		ch, size := utf8.DecodeRune(p)
+		if ch == utf8.RuneError {
+			return nil, fmt.Errorf("invalid utf8 rune")
+		}
+		if unicode.IsSpace(ch) {
+			p = p[size:]
+			continue
+		}
+		return p, nil
+	}
+	return p, nil
+}
+
+// isTupleStart reports whether idx is the start of a top-level tuple on line,
+// not a match inside an already-closed quoted value.
+func isTupleStart(line []byte, idx int) bool {
+	if idx < 0 || idx > len(line) {
+		return false
+	}
+	p := line
+	for len(p) > 0 {
+		var err error
+		p, err = skipLeadingSpace(p)
+		if err != nil || len(p) == 0 {
+			return false
+		}
+		off := len(line) - len(p)
+		if off == idx {
+			return true
+		}
+		if off > idx {
+			return false
+		}
+		_, n, err := parseTuple(p, false)
+		if n <= 0 {
+			return false
+		}
+		_ = err
+		p = p[n:]
+	}
+	return false
+}
+
+// joinRest concatenates the current tuple fragment with later continuation
+// lines, inserting the same single space main's concat parser uses.
+func joinRest(head []byte, rest [][]byte) []byte {
+	n := len(head)
+	for _, line := range rest {
+		n += 1 + len(line)
+	}
+	buf := make([]byte, 0, n)
+	buf = append(buf, head...)
+	for _, line := range rest {
+		buf = append(buf, ' ')
+		buf = append(buf, line...)
+	}
+	return buf
+}
+
+func parseJoined(p []byte, results *Record) error {
+	if !utf8.Valid(p) {
+		return fmt.Errorf("invalid utf8 rune")
+	}
+	for len(p) > 0 {
+		var err error
+		p, err = skipLeadingSpace(p)
+		if err != nil {
+			return err
+		}
+		if len(p) == 0 {
+			return nil
+		}
+		tup, n, err := parseTuple(p, true)
+		if err != nil {
+			return err
+		}
+		if n <= 0 {
+			return fmt.Errorf("invalid syntax")
+		}
+		*results = append(*results, tup)
+		p = p[n:]
+	}
+	return nil
+}
+
 func parseRecordLines(lines [][]byte, results *Record, copyStr bool) error {
 	if *results == nil {
 		*results = make(Record, 0, 10)
 	}
-	var leftover []byte
 	for i, line := range lines {
-		p := line
-		if leftover != nil {
-			leftover = append(leftover, ' ')
-			leftover = append(leftover, line...)
-			p = leftover
-			copyStr = true
-		}
-		if !utf8.Valid(p) {
+		if !utf8.Valid(line) {
 			return fmt.Errorf("invalid utf8 rune")
 		}
+		p := line
 		for len(p) > 0 {
-			if p[0] < utf8.RuneSelf {
-				if isASCIISpace(p[0]) {
-					p = p[1:]
-					continue
-				}
-			} else {
-				ch, size := utf8.DecodeRune(p)
-				if ch == utf8.RuneError {
-					return fmt.Errorf("invalid utf8 rune")
-				}
-				if unicode.IsSpace(ch) {
-					p = p[size:]
-					continue
-				}
+			var err error
+			p, err = skipLeadingSpace(p)
+			if err != nil {
+				return err
 			}
-			if needJoinForQuote(p) && i+1 < len(lines) {
-				leftover = append(leftover[:0], p...)
+			if len(p) == 0 {
 				break
 			}
-			tup, n, err := parseTuple(p, copyStr)
+			if i+1 < len(lines) && needJoinForQuote(p) {
+				return parseJoined(joinRest(p, lines[i+1:]), results)
+			}
+			var tup Tuple
+			var n int
+			tup, n, err = parseTuple(p, copyStr)
 			if err != nil {
 				if i+1 < len(lines) {
-					leftover = append(leftover[:0], p...)
-					break
+					return parseJoined(joinRest(p, lines[i+1:]), results)
 				}
 				return err
 			}
 			*results = append(*results, tup)
 			p = p[n:]
-			leftover = nil
 		}
 	}
 	return nil

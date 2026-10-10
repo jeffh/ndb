@@ -417,6 +417,8 @@ func hasAttrValKeys(recBytes, attrEq, attrSp []byte, value string) bool {
 }
 
 func hasAttrValLines(lines [][]byte, attrEq, attrSp []byte, value string) bool {
+	joinedChecked := false
+	joinedMatch := false
 	for i, line := range lines {
 		from := 0
 		for {
@@ -426,12 +428,23 @@ func hasAttrValLines(lines [][]byte, attrEq, attrSp []byte, value string) bool {
 			}
 			p := line[idx:]
 			if needJoinForQuote(p) && i+1 < len(lines) {
-				// Only join when this hit is a real tuple start. An
-				// `attr="` substring inside an already-closed quote is
-				// not a new opening quote; skip it and keep scanning.
-				if isTupleStart(line, idx) {
-					return hasAttrValKeys(joinFrom(lines, 0), attrEq, attrSp, value)
+				// Main's concat scan treats this as an opening quote
+				// that may run onto later lines. Try that first.
+				if !joinedChecked {
+					joinedMatch = hasAttrValKeys(joinFrom(lines, 0), attrEq, attrSp, value)
+					joinedChecked = true
 				}
+				if joinedMatch {
+					return true
+				}
+				if isTupleStart(line, idx) {
+					// Real multiline quote: do not rescan later
+					// lines as new tuples (ip="a" / ip=1 inside).
+					return false
+				}
+				// attr=" inside an already-closed quote. Concat
+				// missed; keep scanning for a later real tuple
+				// (k="x a=" / a=real).
 				from = idx + 1
 				continue
 			}

@@ -424,6 +424,9 @@ func TestCompatVsMainSeeded(t *testing.T) {
 		`="0 1 1="`,
 		`ip k=" ip="`,
 		"k=\"x a=\"\n\ta=real\n",
+		"k=\"x a=\"\n\tfoo\"\n",
+		"k=\"hello a=\"\n\tmore\"\n",
+		"prefix k=\"unclosed a=\"\n\tmore\"\n",
 	}
 	for i, s := range seeds {
 		t.Run(fmt.Sprintf("seed%d", i), func(t *testing.T) {
@@ -450,6 +453,9 @@ func FuzzParseCompat(f *testing.F) {
 		`="0 1 1="`,
 		`ip k=" ip="`,
 		"k=\"x a=\"\n\ta=real\n",
+		"k=\"x a=\"\n\tfoo\"\n",
+		"k=\"hello a=\"\n\tmore\"\n",
+		"prefix k=\"unclosed a=\"\n\tmore\"\n",
 	} {
 		f.Add(s)
 	}

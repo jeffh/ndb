@@ -369,6 +369,20 @@ func TestParseOneHeldRecordIndependentOfInputMutation(t *testing.T) {
 	}
 }
 
+func TestHasAttrValueDoesNotRescanContinuationInsideMultilineQuote(t *testing.T) {
+	in := "ip=\"a\n\tip=1 b\"\n"
+	db, err := ParseOne([]byte(in))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := db.SearchSlice(HasAttrValue("ip", "1")); len(got) != 0 {
+		t.Fatalf("HasAttrValue(ip, 1) should not match inside a multiline quoted value, got %d (%q)", len(got), got[0].String())
+	}
+	if got := db.SearchSlice(HasAttrValue("ip", "a ip=1 b")); len(got) != 1 {
+		t.Fatalf("HasAttrValue(ip, exact multiline value) got %d", len(got))
+	}
+}
+
 func TestHasAttrValueDoesNotScanInsideParsedValue(t *testing.T) {
 	db, err := ParseOneString(`a="x a=1 "`)
 	if err != nil {

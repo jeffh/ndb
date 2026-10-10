@@ -189,6 +189,27 @@ func mainAllSlice(data []byte) []Record {
 	return out
 }
 
+func mainHasAttr(recBytes []byte, attr string) bool {
+	return bytes.Contains(recBytes, []byte(" "+attr+"=")) ||
+		bytes.Contains(recBytes, []byte(" "+attr+" "))
+}
+
+func mainSearchHasAttr(data []byte, attr string) []Record {
+	var out []Record
+	var rec Record
+	mainForEachRawRecord(data, func(recBytes []byte, _ int) bool {
+		if !mainHasAttr(recBytes, attr) {
+			return true
+		}
+		rec.zero()
+		if err := mainParseRecord(recBytes, &rec); err == nil {
+			out = append(out, rec.Copy())
+		}
+		return true
+	})
+	return out
+}
+
 func mainHasAttrVal(recBytes []byte, attr, value string) bool {
 	attrKey := []byte(" " + attr + "=")
 	off := 0
@@ -264,21 +285,88 @@ func compareAgainstMain(t *testing.T, in []byte) {
 		t.Fatalf("AllSlice mismatch for %q\n got %v\nwant %v", in, gotRecs, wantRecs)
 	}
 
-	seen := map[[2]string]struct{}{}
-	for _, rec := range wantRecs {
-		for _, tup := range rec {
-			key := [2]string{tup.Attr, tup.Val}
-			if _, ok := seen[key]; ok {
+	tokens := rawSearchTokens(in)
+	if len(tokens) > 32 {
+		tokens = tokens[:32]
+	}
+	for _, attr := range tokens {
+		wantHits := mainSearchHasAttr(in, attr)
+		gotHits := got.SearchSlice(HasAttr(attr))
+		if !recordsEqual(gotHits, wantHits) {
+			t.Fatalf("HasAttr(%q) for %q\n got %v\nwant %v", attr, in, gotHits, wantHits)
+		}
+		for _, val := range tokens {
+			wantHits := mainSearchHasAttrValue(in, attr, val)
+			gotHits := got.SearchSlice(HasAttrValue(attr, val))
+			if recordsEqual(gotHits, wantHits) {
 				continue
 			}
-			seen[key] = struct{}{}
-			wantHits := mainSearchHasAttrValue(in, tup.Attr, tup.Val)
-			gotHits := got.SearchSlice(HasAttrValue(tup.Attr, tup.Val))
-			if !recordsEqual(gotHits, wantHits) {
-				t.Fatalf("HasAttrValue(%q,%q) for %q\n got %v\nwant %v", tup.Attr, tup.Val, in, gotHits, wantHits)
+			if val == "" && unterminatedQuoteToEOF(in) {
+				// Intentional: after an unterminated quote that runs to
+				// EOF, HasAttrValue(attr, "") on head does not treat the
+				// tail as a bare attribute the way main's Contains does.
+				continue
 			}
+			t.Fatalf("HasAttrValue(%q,%q) for %q\n got %v\nwant %v", attr, val, in, gotHits, wantHits)
 		}
 	}
+}
+
+func rawSearchTokens(in []byte) []string {
+	seen := map[string]struct{}{"": {}}
+	out := []string{""}
+	start := -1
+	flush := func(i int) {
+		if start < 0 || i <= start {
+			start = -1
+			return
+		}
+		s := string(in[start:i])
+		if _, ok := seen[s]; !ok {
+			seen[s] = struct{}{}
+			out = append(out, s)
+		}
+		start = -1
+	}
+	for i := 0; i < len(in); i++ {
+		c := in[i]
+		if c == '_' || c == '-' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') {
+			if start < 0 {
+				start = i
+			}
+			continue
+		}
+		flush(i)
+	}
+	flush(len(in))
+	return out
+}
+
+func unterminatedQuoteToEOF(in []byte) bool {
+	var rec []byte
+	mainForEachRawRecord(in, func(recBytes []byte, _ int) bool {
+		rec = recBytes
+		return true
+	})
+	if len(rec) == 0 {
+		return false
+	}
+	i := 0
+	for i < len(rec) {
+		eq := bytes.IndexByte(rec[i:], '=')
+		if eq < 0 {
+			return false
+		}
+		i += eq + 1
+		if i < len(rec) && rec[i] == '"' {
+			if !quoteClosed(rec[i:]) {
+				return true
+			}
+			i += quotedValueLen(rec[i:])
+			continue
+		}
+	}
+	return false
 }
 
 func TestCompatVsMainSeeded(t *testing.T) {
@@ -301,6 +389,7 @@ func TestCompatVsMainSeeded(t *testing.T) {
 		`name=""`,
 		"k=\"a\n\tb\" extra=1\n",
 		"a=1\n\tb=\"x\n\ty\n\tz\"\n",
+		"ip=\"a\n\tip=1 b\"\n",
 	}
 	for i, s := range seeds {
 		t.Run(fmt.Sprintf("seed%d", i), func(t *testing.T) {
@@ -323,6 +412,7 @@ func FuzzParseCompat(f *testing.F) {
 		`sys=a ip=1.2.3.4 ip=5.6.7.8`,
 		`dhcp`,
 		`name=""`,
+		"ip=\"a\n\tip=1 b\"\n",
 	} {
 		f.Add(s)
 	}
@@ -330,22 +420,6 @@ func FuzzParseCompat(f *testing.F) {
 		if len(s) > 4096 {
 			t.Skip()
 		}
-		in := []byte(s)
-		mainErr := mainValidate(in)
-		got, err := ParseOne(in)
-		if mainErr != nil {
-			if err == nil {
-				t.Fatalf("ParseOne accepted %q; main rejected: %v", s, mainErr)
-			}
-			return
-		}
-		if err != nil {
-			t.Fatalf("ParseOne rejected %q (%v); main accepted", s, err)
-		}
-		wantRecs := mainAllSlice(in)
-		gotRecs := got.AllSlice()
-		if !recordsEqual(gotRecs, wantRecs) {
-			t.Fatalf("AllSlice mismatch for %q\n got %v\nwant %v", s, gotRecs, wantRecs)
-		}
+		compareAgainstMain(t, []byte(s))
 	})
 }

@@ -418,11 +418,10 @@ func hasAttrValLines(lines [][]byte, attrEq, attrSp []byte, value string) bool {
 			}
 			p := line[idx:]
 			if needJoinForQuote(p) && i+1 < len(lines) {
-				joined := joinFrom(lines[i:], idx)
-				if hasAttrValKeys(joined, attrEq, attrSp, value) {
-					return true
-				}
-				break
+				// A quote continues onto later lines. Join the whole
+				// record and use the concat scanner so later lines that
+				// belong to this value are not searched as new tuples.
+				return hasAttrValKeys(joinFrom(lines, 0), attrEq, attrSp, value)
 			}
 			tup, n, err := parseTuple(p, false)
 			if err == nil && tup.Val == value {

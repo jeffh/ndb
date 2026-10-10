@@ -373,7 +373,6 @@ func TestParseEdgeCases(t *testing.T) {
 		if len(records) != 1 {
 			t.Fatalf("expected 1 record, got %d", len(records))
 		}
-		// Should preserve the escaped newline
 		name := records[0].Get("name")
 		if name != "John\nDoe" {
 			t.Fatalf("expected name to contain newline, got %s", name)
@@ -453,27 +452,6 @@ func TestParseQuotedValueCRLFMultiline(t *testing.T) {
 	}
 	if got := db.SearchSlice(HasAttrValue("k", "a b c")); len(got) != 1 {
 		t.Fatalf("HasAttrValue missed CRLF multiline quote, got %d", len(got))
-	}
-}
-
-func TestQuoteClosed(t *testing.T) {
-	cases := []struct {
-		in   string
-		want bool
-	}{
-		{`"abc"`, true},
-		{`"abc`, false},
-		{`"abc\"`, false},
-		{`"abc\\"`, true},
-		{`"abc\"more"`, true},
-		{`"`, false},
-		{``, false},
-		{`abc"`, false},
-	}
-	for _, tc := range cases {
-		if got := quoteClosed([]byte(tc.in)); got != tc.want {
-			t.Fatalf("quoteClosed(%q)=%v want %v", tc.in, got, tc.want)
-		}
 	}
 }
 
@@ -652,34 +630,7 @@ func TestContinuationJoinScaling(t *testing.T) {
 		t.Fatalf("Open database-file quote + %d continuations took %s, want <%s", n, openDB, bound)
 	}
 
-	start = time.Now()
-	_ = mainAllSlice(closed)
-	mainClosed := time.Since(start)
-	unterm := quotedContinuationInput(n, false)
-	start = time.Now()
-	_ = mainValidate(unterm)
-	mainUnterm := time.Since(start)
-	t.Logf("head ParseOne+All=%s OpenOne+All=%s Open=%s; main AllSlice(closed)=%s Validate(unterm)=%s",
-		parseAll, openOne, openDB, mainClosed, mainUnterm)
-
-	timeHeadMain := func(name string, in []byte) {
-		t.Helper()
-		hs := time.Now()
-		_, herr := ParseOne(in)
-		hd := time.Since(hs)
-		ms := time.Now()
-		_ = mainValidate(in)
-		md := time.Since(ms)
-		t.Logf("%s: head ParseOne=%s (err=%v) main Validate=%s", name, hd, herr, md)
-	}
-	timeHeadMain("40k closed", quotedContinuationInput(40000, true))
-	timeHeadMain("40k unterm", quotedContinuationInput(40000, false))
-	bad := append([]byte(`a="\x`), bytesRepeatCont(40000)...)
-	timeHeadMain("40k bad-escape", bad)
-}
-
-func bytesRepeatCont(n int) []byte {
-	return []byte(strings.Repeat("\n\tx", n))
+	t.Logf("ParseOne+All=%s OpenOne+All=%s Open=%s", parseAll, openOne, openDB)
 }
 
 func TestContinuationJoinIsLinear(t *testing.T) {

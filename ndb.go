@@ -56,6 +56,10 @@ func Open(sys FileSystem, filepath string) (*Ndb, error) {
 		}
 		count += n
 		for record := range db.Search(HasAttrValue("database", "")) {
+			// HasAttrValue is a substring prefilter; require a real key.
+			if !record.HasKey("database") {
+				continue
+			}
 			for _, file := range record.GetAll("file") {
 				if !slices.Contains(db.files, file) {
 					db.files = append(db.files, file)
@@ -140,6 +144,9 @@ func (n *Ndb) readFiles(skip int) (int, error) {
 		idx := i + skip
 		buf, err := n.readFile(fileToRead)
 		if err != nil {
+			return count, err
+		}
+		if err := validateRecords(buf); err != nil {
 			return count, err
 		}
 		n.data[idx] = buf

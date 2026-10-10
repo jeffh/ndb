@@ -178,7 +178,58 @@ go test ./...
 
 # Run with race detection
 go test -race ./...
-
-# Run benchmarks
-go test -bench . -benchmem
 ```
+
+## Benchmarks
+
+Regression benches cover the public search and iteration APIs:
+
+| Benchmark | Public API | What it measures |
+| --- | --- | --- |
+| `BenchmarkSearchHasAttr` | `Search(HasAttr("sys"))` + `Get` | key-present search over every record |
+| `BenchmarkSearchHasAttrMiss` | `Search(HasAttr("no-such-attr"))` | key scan with no matches (no record parse) |
+| `BenchmarkSearchHasAttrValue` | `Search(HasAttrValue("sys", "bench-target"))` | key=value search for one known hit |
+| `BenchmarkIterateAllRecords` | `All()` | iterate every record |
+| `BenchmarkIterateRecordsAndKeys` | `All()` + `Len`/`KeyAt`/`ValueAt` | iterate every record and every key |
+
+Fixtures are generated at bench time with a fixed seed into a process temp dir (one file per size, cached across calibration). They are never committed. A few percent of records use quoted values with spaces and `#` (`note="a b # c"`), trailing `#` comments, bare attributes, and varied attribute counts so the quoted-hash parse path is exercised.
+
+Sizes:
+
+- `small` — 64 KiB
+- `medium` — 8 MiB (also reports peak memory)
+- `large` — 128 MiB (peak memory; skipped unless `NDB_BENCH_LARGE=1`, and always skipped under `-short`)
+
+```bash
+# Default: small + medium. A normal `go test ./...` does not run benches.
+go test -run '^$' -bench . -benchmem -count=6 -benchtime=1s
+
+# Same, via make
+make bench-stat
+
+# Also run 128 MiB cases
+NDB_BENCH_LARGE=1 go test -run '^$' -bench . -benchmem -count=3 -benchtime=1s
+
+# Skip 100MB+ even if the env var is set
+NDB_BENCH_LARGE=1 go test -short -run '^$' -bench . -benchmem
+```
+
+`b.SetBytes` is the fixture size, so the `MB/s` column is scan throughput. `b.ReportAllocs` reports `B/op` and `allocs/op`.
+
+Published baseline tables in the PR that added these benches were taken on **Go 1.23**.
+
+Medium and large cases also report custom metrics from a **separate** pass after the timed loop (`ReadMemStats` stops the world, so sampling inside the loop would inflate `ns/op`). Each metric is **peak minus a post-GC baseline** taken immediately before that pass, so the fixture already held in memory is not counted as scan growth:
+
+- `peak-heap-B` — max `runtime.MemStats.HeapInuse` minus the post-GC baseline. This is the Go-level signal that `Search`/`All` started retaining every record instead of reusing one.
+- `peak-rss-B` — max Linux RSS from `/proc/self/statm` minus the same baseline (resident pages × page size). **Linux-only; omitted on other OSes.** Includes non-Go mappings; treat it as process-footprint growth, not as `B/op`.
+
+Compare the working tree to `origin/main` with [benchstat](https://pkg.go.dev/golang.org/x/perf/cmd/benchstat) pinned in `scripts/bench-compare.sh`. The script creates a detached git worktree for the base ref and overlays this tree's `bench_test.go` onto it, so new benches still measure main's library. `LARGE=1` turns off `-short`.
+
+```bash
+make bench-compare
+# or
+COUNT=6 BENCHTIME=1s ./scripts/bench-compare.sh
+# optional: LARGE=1 to include 128 MiB (implies SHORT=0)
+```
+
+An optional **Benchmarks** GitHub Actions workflow runs on `workflow_dispatch` and on pull requests that touch `**/*.go` (or the bench script/workflow). It is not part of the required push/PR checks, uses `contents: read` only, cancels overlapping runs on the same ref, uploads `bench.txt` as an artifact, and writes the same output to the job summary. The job is informational and is not used as a pass/fail perf gate. Default `-count` is 6, matching `scripts/bench-compare.sh`.

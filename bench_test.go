@@ -59,10 +59,9 @@ func skipGatedSize(b *testing.B, sz benchSize) {
 }
 
 type benchDB struct {
-	db      *Ndb
-	size    int64
-	recs    int
-	sysHits int
+	db   *Ndb
+	size int64
+	recs int
 }
 
 var (
@@ -96,14 +95,13 @@ func cachedBenchDB(b *testing.B, sz benchSize) benchDB {
 	if err != nil {
 		b.Fatal(err)
 	}
-	env := benchDB{db: db, size: st.size, recs: st.records, sysHits: st.sysHits}
+	env := benchDB{db: db, size: st.size, recs: st.records}
 	fixtureCache[sz.target] = env
 	return env
 }
 
 type fixtureStats struct {
 	records int
-	sysHits int
 	size    int64
 }
 
@@ -179,7 +177,6 @@ func writeBenchFixture(path string, targetBytes int) (st fixtureStats, err error
 		}
 		written += n
 		st.records++
-		st.sysHits++
 	}
 	if err := w.Flush(); err != nil {
 		return st, err
@@ -342,7 +339,7 @@ func BenchmarkSearchHasAttr(b *testing.B) {
 		}
 		benchSink = bytes
 		return n
-	}, func(env benchDB) int { return env.sysHits })
+	}, func(env benchDB) int { return env.recs })
 }
 
 // BenchmarkSearchHasAttrMiss walks the file looking for a key that never
@@ -421,9 +418,6 @@ func TestBenchFixturePublicAPI(t *testing.T) {
 	if st.size <= 0 {
 		t.Fatalf("empty fixture")
 	}
-	if st.sysHits != st.records {
-		t.Fatalf("sysHits=%d records=%d", st.sysHits, st.records)
-	}
 
 	db, err := OpenOne(&LocalFileSystem{}, path)
 	if err != nil {
@@ -470,8 +464,8 @@ func TestBenchFixturePublicAPI(t *testing.T) {
 	if len(lens) < 2 {
 		t.Fatalf("expected varied attribute counts, got lens %v", lens)
 	}
-	if got := len(db.SearchSlice(HasAttr("sys"))); got != st.sysHits {
-		t.Fatalf("HasAttr(sys)=%d want %d", got, st.sysHits)
+	if got := len(db.SearchSlice(HasAttr("sys"))); got != st.records {
+		t.Fatalf("HasAttr(sys)=%d want %d", got, st.records)
 	}
 	if got := len(db.SearchSlice(HasAttr("no-such-attr"))); got != 0 {
 		t.Fatalf("miss search returned %d", got)

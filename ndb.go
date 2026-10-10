@@ -221,7 +221,7 @@ func HasAttr(attr string) SearchPredicate {
 
 // HasAttrValue returns a predicate that matches records with the given attribute and value.
 // In multi-line records it can also match attr=value text inside another
-// attribute's continued quoted value (same concat-scan behavior as on main).
+// attribute's continued quoted value.
 // For example, `b="multi\n\ta=1 z"` matches HasAttrValue("a", "1").
 func HasAttrValue(attr, value string) SearchPredicate {
 	return attrPred{
@@ -428,10 +428,8 @@ func hasAttrValLines(lines [][]byte, attrEq, attrSp []byte, value string) bool {
 			}
 			p := line[idx:]
 			if needJoinForQuote(p) && i+1 < len(lines) {
-				// Main's concat scan treats this as an opening quote
-				// that may run onto later lines. Try that first.
 				if !joinedChecked {
-					joinedMatch = hasAttrValKeys(joinFrom(lines, 0), attrEq, attrSp, value)
+					joinedMatch = hasAttrValKeys(joinFrom(lines), attrEq, attrSp, value)
 					joinedChecked = true
 				}
 				if joinedMatch {
@@ -442,9 +440,6 @@ func hasAttrValLines(lines [][]byte, attrEq, attrSp []byte, value string) bool {
 					// lines as new tuples (ip="a" / ip=1 inside).
 					return false
 				}
-				// attr=" inside an already-closed quote. Concat
-				// missed; keep scanning for a later real tuple
-				// (k="x a=" / a=real).
 				from = idx + 1
 				continue
 			}
@@ -493,9 +488,6 @@ func spaceFramedContains(line, key []byte) bool {
 // the attribute name (the byte after key's leading space). key must start
 // with space (as in " attr="). from is a line index to resume after a hit.
 func indexFramed(line, key []byte, from int) int {
-	if len(key) == 0 {
-		return from
-	}
 	if from <= 0 && key[0] == ' ' && bytes.HasPrefix(line, key[1:]) {
 		return 0
 	}
@@ -506,15 +498,6 @@ func indexFramed(line, key []byte, from int) int {
 	if start < len(line) {
 		if i := bytes.Index(line[start:], key); i >= 0 {
 			return start + i + 1 // skip the space in key
-		}
-	}
-	if key[len(key)-1] == ' ' {
-		bare := key[:len(key)-1] // " attr"
-		if bytes.HasSuffix(line, bare) {
-			idx := len(line) - len(bare) + 1
-			if idx >= from {
-				return idx
-			}
 		}
 	}
 	return -1
@@ -529,41 +512,25 @@ func needJoinForQuote(p []byte) bool {
 	if vs >= len(p) || p[vs] != '"' {
 		return false
 	}
-	return !quoteClosed(p[vs:])
-}
-
-// quoteClosed reports whether p starts with '"' and contains an escape-aware
-// closing quote. A trailing \" is not a closer.
-func quoteClosed(p []byte) bool {
-	if len(p) == 0 || p[0] != '"' {
+	q := p[vs:]
+	n := quotedValueLen(q)
+	if n < len(q) {
 		return false
 	}
-	escape := false
-	for i := 1; i < len(p); i++ {
-		c := p[i]
-		if escape {
-			escape = false
-			continue
-		}
-		if c == '\\' {
-			escape = true
-			continue
-		}
-		if c == '"' {
-			return true
-		}
+	if n < 2 || q[n-1] != '"' {
+		return true
 	}
-	return false
+	esc := 0
+	for i := n - 2; i >= 1 && q[i] == '\\'; i-- {
+		esc++
+	}
+	return esc%2 == 1
 }
 
-func joinFrom(lines [][]byte, idx int) []byte {
+func joinFrom(lines [][]byte) []byte {
 	var buf []byte
 	buf = append(buf, ' ')
-	if idx > 0 && idx <= len(lines[0]) {
-		buf = append(buf, lines[0][idx:]...)
-	} else {
-		buf = append(buf, lines[0]...)
-	}
+	buf = append(buf, lines[0]...)
 	buf = append(buf, ' ')
 	for _, line := range lines[1:] {
 		buf = append(buf, line...)
@@ -624,8 +591,6 @@ func isTupleStart(line []byte, idx int) bool {
 	return false
 }
 
-// joinRest concatenates the current tuple fragment with later continuation
-// lines, inserting the same single space main's concat parser uses.
 func joinRest(head []byte, rest [][]byte) []byte {
 	n := len(head)
 	for _, line := range rest {
@@ -719,7 +684,7 @@ func parseTuple(p []byte, copyStr bool) (Tuple, int, error) {
 		if length >= 2 && q[length-1] == '"' && bytes.IndexByte(q, '\\') < 0 {
 			return Tuple{attr, cloneString(q[1:length-1], copyStr)}, valueStart + length, nil
 		}
-		actualValue, err := strconv.Unquote(bytesToString(q))
+		actualValue, err := strconv.Unquote(cloneString(q, false))
 		if err != nil {
 			return Tuple{}, valueStart + length, err
 		}
@@ -738,13 +703,6 @@ func cloneString(b []byte, copyStr bool) string {
 	}
 	if copyStr {
 		return string(b)
-	}
-	return unsafe.String(unsafe.SliceData(b), len(b))
-}
-
-func bytesToString(b []byte) string {
-	if len(b) == 0 {
-		return ""
 	}
 	return unsafe.String(unsafe.SliceData(b), len(b))
 }

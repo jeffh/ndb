@@ -1,0 +1,88 @@
+name: Benchmarks
+
+on:
+  workflow_dispatch:
+    inputs:
+      benchtime:
+        description: go test -benchtime
+        required: false
+        default: "1s"
+      count:
+        description: go test -count (benchstat-friendly repeats)
+        required: false
+        default: "5"
+      large:
+        description: Run 100MB+ benches (NDB_BENCH_LARGE=1)
+        type: boolean
+        required: false
+        default: false
+  pull_request:
+    paths:
+      - "bench_test.go"
+      - "scripts/bench-compare.sh"
+      - ".github/workflows/bench.yml"
+
+# Separate from the required Test/Build workflow. Not required for merge.
+# go test -bench does not compare timings, so performance noise cannot fail this job.
+permissions:
+  contents: read
+
+jobs:
+  bench:
+    name: Benchmark
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run benchmarks
+        env:
+          BENCH_COUNT: ${{ inputs.count || '3' }}
+          BENCH_TIME: ${{ inputs.benchtime || '1s' }}
+          NDB_BENCH_LARGE: ${{ inputs.large && '1' || '' }}
+        run: |
+          set -euo pipefail
+          mkdir -p tmp/bench
+          {
+            echo "# go=$(go env GOVERSION) $(go env GOOS)/$(go env GOARCH)"
+            echo "# cpu=$(uname -p 2>/dev/null || true) $(nproc) cores"
+            echo "# mem=$(awk '/MemTotal/ {print $2, $3}' /proc/meminfo)"
+            lscpu | awk -F: '/Model name/ {gsub(/^[ \t]+/, "", $2); print "# model="$2; exit}'
+            go test -run '^$' -bench . -benchmem -count="$BENCH_COUNT" -benchtime="$BENCH_TIME"
+          } | tee tmp/bench/bench.txt
+
+      - name: Publish summary
+        if: always()
+        run: |
+          {
+            echo "## Benchmark results"
+            echo
+            echo "This check is informational. It does not fail on performance noise."
+            echo
+            echo "- Event: \`${{ github.event_name }}\`"
+            echo "- Runner: \`${{ runner.os }}\` / \`${{ runner.arch }}\`"
+            echo "- Go: \`$(go env GOVERSION)\`"
+            echo
+            echo '```'
+            if [[ -f tmp/bench/bench.txt ]]; then
+              cat tmp/bench/bench.txt
+            else
+              echo "(no bench output)"
+            fi
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload bench.txt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-results
+          path: tmp/bench/bench.txt
+          if-no-files-found: warn

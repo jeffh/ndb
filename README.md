@@ -216,7 +216,7 @@ NDB_BENCH_LARGE=1 go test -short -run '^$' -bench . -benchmem
 
 `b.SetBytes` is the fixture size, so the `MB/s` column is scan throughput. `b.ReportAllocs` reports `B/op` and `allocs/op`.
 
-Published baseline tables in the PR that added these benches were taken on **Go 1.23**.
+Published baseline tables in the PR that added these benches were taken on **Go 1.23**. CI and `go.mod` now use **Go 1.27** (`actions/setup-go` reads `go-version-file: go.mod`).
 
 Medium and large cases also report custom metrics from a **separate** pass after the timed loop (`ReadMemStats` stops the world, so sampling inside the loop would inflate `ns/op`). Each metric is **peak minus a post-GC baseline** taken immediately before that pass, so the fixture already held in memory is not counted as scan growth:
 

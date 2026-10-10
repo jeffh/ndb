@@ -10,7 +10,7 @@ on:
       count:
         description: go test -count (benchstat-friendly repeats)
         required: false
-        default: "5"
+        default: "6"
       large:
         description: Run 100MB+ benches (NDB_BENCH_LARGE=1)
         type: boolean
@@ -18,14 +18,20 @@ on:
         default: false
   pull_request:
     paths:
-      - "bench_test.go"
+      - "**/*.go"
       - "scripts/bench-compare.sh"
       - ".github/workflows/bench.yml"
+      - "Makefile"
 
-# Separate from the required Test/Build workflow. Not required for merge.
-# go test -bench does not compare timings, so performance noise cannot fail this job.
+# Separate from the required Test/Build workflow. Not a required status check
+# on main (repo ruleset has no required_status_checks). go test -bench does
+# not compare timings, so performance noise cannot fail this job.
 permissions:
   contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   bench:
@@ -44,7 +50,7 @@ jobs:
 
       - name: Run benchmarks
         env:
-          BENCH_COUNT: ${{ inputs.count || '3' }}
+          BENCH_COUNT: ${{ inputs.count || '6' }}
           BENCH_TIME: ${{ inputs.benchtime || '1s' }}
           NDB_BENCH_LARGE: ${{ inputs.large && '1' || '' }}
         run: |

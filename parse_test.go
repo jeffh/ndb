@@ -3,6 +3,7 @@ package ndb
 import (
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 )
 
@@ -380,6 +381,102 @@ func TestParseEdgeCases(t *testing.T) {
 	})
 }
 
+func TestParseMultilineQuotedValue(t *testing.T) {
+	db, err := ParseOneString("person name=\"John\n\tDoe\" age=30")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	recs := db.AllSlice()
+	if len(recs) != 1 {
+		t.Fatalf("expected 1 record, got %d", len(recs))
+	}
+	if recs[0].Get("name") != "John Doe" {
+		t.Fatalf("expected joined quoted value 'John Doe', got %q", recs[0].Get("name"))
+	}
+	if recs[0].Get("age") != "30" {
+		t.Fatalf("expected age=30, got %q", recs[0].Get("age"))
+	}
+	if got := db.SearchSlice(HasAttrValue("name", "John Doe")); len(got) != 1 {
+		t.Fatalf("HasAttrValue missed multiline quoted name, got %d", len(got))
+	}
+}
+
+func TestParseQuotedValueSpanningThreeLines(t *testing.T) {
+	in := "k=\"a\n\tb\n\tc\"\n"
+	db, err := ParseOne([]byte(in))
+	if err != nil {
+		t.Fatalf("ParseOne 3-line quote: %v", err)
+	}
+	recs := db.AllSlice()
+	if len(recs) != 1 {
+		t.Fatalf("expected 1 record, got %d (%v)", len(recs), recs)
+	}
+	if recs[0].Get("k") != "a b c" {
+		t.Fatalf("k=%q want %q", recs[0].Get("k"), "a b c")
+	}
+	if got := db.SearchSlice(HasAttrValue("k", "a b c")); len(got) != 1 {
+		t.Fatalf("HasAttrValue missed 3-line quoted value, got %d", len(got))
+	}
+}
+
+func TestParseQuotedValueEscapedQuoteThenContinuation(t *testing.T) {
+	in := "k=\"abc\\\"\n\tmore\"\n"
+	db, err := ParseOne([]byte(in))
+	if err != nil {
+		t.Fatalf("ParseOne escaped quote + continuation: %v", err)
+	}
+	recs := db.AllSlice()
+	if len(recs) != 1 {
+		t.Fatalf("expected 1 record, got %d", len(recs))
+	}
+	want := `abc" more`
+	if recs[0].Get("k") != want {
+		t.Fatalf("k=%q want %q", recs[0].Get("k"), want)
+	}
+	if got := db.SearchSlice(HasAttrValue("k", want)); len(got) != 1 {
+		t.Fatalf("HasAttrValue missed escaped-quote continuation, got %d", len(got))
+	}
+}
+
+func TestParseQuotedValueCRLFMultiline(t *testing.T) {
+	in := "k=\"a\r\n\tb\r\n\tc\"\r\n"
+	db, err := ParseOne([]byte(in))
+	if err != nil {
+		t.Fatalf("ParseOne CRLF multiline quote: %v", err)
+	}
+	recs := db.AllSlice()
+	if len(recs) != 1 {
+		t.Fatalf("expected 1 record, got %d", len(recs))
+	}
+	if recs[0].Get("k") != "a b c" {
+		t.Fatalf("k=%q want %q", recs[0].Get("k"), "a b c")
+	}
+	if got := db.SearchSlice(HasAttrValue("k", "a b c")); len(got) != 1 {
+		t.Fatalf("HasAttrValue missed CRLF multiline quote, got %d", len(got))
+	}
+}
+
+func TestQuoteClosed(t *testing.T) {
+	cases := []struct {
+		in   string
+		want bool
+	}{
+		{`"abc"`, true},
+		{`"abc`, false},
+		{`"abc\"`, false},
+		{`"abc\\"`, true},
+		{`"abc\"more"`, true},
+		{`"`, false},
+		{``, false},
+		{`abc"`, false},
+	}
+	for _, tc := range cases {
+		if got := quoteClosed([]byte(tc.in)); got != tc.want {
+			t.Fatalf("quoteClosed(%q)=%v want %v", tc.in, got, tc.want)
+		}
+	}
+}
+
 func TestParseKeepsInchMarkOutsideQuotes(t *testing.T) {
 	cases := []struct {
 		name string
@@ -489,4 +586,129 @@ provider=anthropic model=claude`
 			t.Fatalf("expected model=gpt-4, got %s", records[0].Get("model"))
 		}
 	})
+}
+
+func quotedContinuationInput(n int, closed bool) []byte {
+	var b strings.Builder
+	b.Grow(4 + n*3)
+	b.WriteString(`a="`)
+	for i := 0; i < n; i++ {
+		b.WriteString("\n\tx")
+	}
+	if closed {
+		b.WriteByte('"')
+	}
+	return []byte(b.String())
+}
+
+func TestContinuationJoinScaling(t *testing.T) {
+	const n = 100000
+	// Non-race is ~20ms here. CI runs -race -covermode=atomic (~1.5s).
+	// Quadratic join was 1.3s at 40k lines without race, so 5s still fails
+	// the old path even under the slower CI flags.
+	const bound = 5 * time.Second
+
+	closed := quotedContinuationInput(n, true)
+	start := time.Now()
+	db, err := ParseOne(closed)
+	if err != nil {
+		t.Fatalf("ParseOne: %v", err)
+	}
+	got := 0
+	for range db.All() {
+		got++
+	}
+	parseAll := time.Since(start)
+	if got != 1 {
+		t.Fatalf("All()=%d want 1", got)
+	}
+	if parseAll > bound {
+		t.Fatalf("ParseOne+All %d continuations took %s, want <%s", n, parseAll, bound)
+	}
+
+	fs := &MemoryFileSystem{Files: map[string]string{"t.ndb": string(closed)}}
+	start = time.Now()
+	db = mustOpenOne(t, fs, "t.ndb")
+	got = 0
+	for range db.All() {
+		got++
+	}
+	openOne := time.Since(start)
+	if got != 1 {
+		t.Fatalf("OpenOne All()=%d want 1", got)
+	}
+	if openOne > bound {
+		t.Fatalf("OpenOne+All %d continuations took %s, want <%s", n, openOne, bound)
+	}
+
+	root := "database file=\"" + strings.Repeat("\n\tx", n)
+	fs = &MemoryFileSystem{Files: map[string]string{"root.ndb": root}}
+	start = time.Now()
+	if _, err := Open(fs, "root.ndb"); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	openDB := time.Since(start)
+	if openDB > bound {
+		t.Fatalf("Open database-file quote + %d continuations took %s, want <%s", n, openDB, bound)
+	}
+
+	start = time.Now()
+	_ = mainAllSlice(closed)
+	mainClosed := time.Since(start)
+	unterm := quotedContinuationInput(n, false)
+	start = time.Now()
+	_ = mainValidate(unterm)
+	mainUnterm := time.Since(start)
+	t.Logf("head ParseOne+All=%s OpenOne+All=%s Open=%s; main AllSlice(closed)=%s Validate(unterm)=%s",
+		parseAll, openOne, openDB, mainClosed, mainUnterm)
+
+	timeHeadMain := func(name string, in []byte) {
+		t.Helper()
+		hs := time.Now()
+		_, herr := ParseOne(in)
+		hd := time.Since(hs)
+		ms := time.Now()
+		_ = mainValidate(in)
+		md := time.Since(ms)
+		t.Logf("%s: head ParseOne=%s (err=%v) main Validate=%s", name, hd, herr, md)
+	}
+	timeHeadMain("40k closed", quotedContinuationInput(40000, true))
+	timeHeadMain("40k unterm", quotedContinuationInput(40000, false))
+	bad := append([]byte(`a="\x`), bytesRepeatCont(40000)...)
+	timeHeadMain("40k bad-escape", bad)
+}
+
+func bytesRepeatCont(n int) []byte {
+	return []byte(strings.Repeat("\n\tx", n))
+}
+
+func TestContinuationJoinIsLinear(t *testing.T) {
+	timeN := func(n int) time.Duration {
+		in := quotedContinuationInput(n, true)
+		best := time.Duration(1 << 62)
+		for i := 0; i < 3; i++ {
+			start := time.Now()
+			db, err := ParseOne(in)
+			if err != nil {
+				t.Fatalf("ParseOne n=%d: %v", n, err)
+			}
+			for range db.All() {
+			}
+			if d := time.Since(start); d < best {
+				best = d
+			}
+		}
+		return best
+	}
+
+	// 80k is large enough that t1 is several milliseconds even without
+	// -race, so the 4x check always runs. Scaling's 100k/5s bound is the
+	// hard CI guard; this only flags a roughly-quadratic doubling.
+	const n = 80000
+	t1 := timeN(n)
+	t2 := timeN(2 * n)
+	t.Logf("n=%d %s; 2n=%d %s (ratio %.2f)", n, t1, 2*n, t2, float64(t2)/float64(t1))
+	if t2 >= 4*t1 {
+		t.Fatalf("doubling %d→%d: %s → %s (≈4x or worse; want closer to 2x)", n, 2*n, t1, t2)
+	}
 }

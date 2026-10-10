@@ -4,7 +4,8 @@
 # benchstat can consume it (-count=N).
 set -euo pipefail
 
-# Last x/perf revision whose go directive is 1.23 (this module's go.mod).
+# Pinned x/perf revision (its go directive is 1.23; still builds on this
+# module's go 1.27). Bump only if benchstat itself needs a newer toolchain.
 BENCHSTAT_PKG=golang.org/x/perf/cmd/benchstat@v0.0.0-20250807204132-c4b8702907f0
 
 usage() {

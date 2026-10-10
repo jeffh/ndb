@@ -266,34 +266,56 @@ func forEachRawRecord(data []byte, fn func(rec []byte, startLine int) bool) {
 	}
 }
 
+// stripComment cuts an unquoted '#' comment through end of line, matching
+// parseTuple's quote rule: a quoted value starts only when '"' is the first
+// byte after '='. Quoted spans are measured with quotedValueLen so both
+// helpers share the same \" escape scan.
 func stripComment(line []byte) []byte {
-	inQuote := false
-	escape := false
-	for i := 0; i < len(line); i++ {
-		c := line[i]
-		if inQuote {
-			if escape {
-				escape = false
-				continue
-			}
-			if c == '\\' {
-				escape = true
-				continue
-			}
-			if c == '"' {
-				inQuote = false
-			}
-			continue
+	i := 0
+	for i < len(line) {
+		for i < len(line) && isTupleSpace(line[i]) {
+			i++
 		}
-		if c == '"' {
-			inQuote = true
-			continue
+		if i >= len(line) {
+			return line
 		}
-		if c == '#' {
+		if line[i] == '#' {
 			return line[:i]
 		}
+		end := bytes.IndexAny(line[i:], "=# \t\r\n")
+		if end == -1 {
+			return line
+		}
+		i += end
+		if line[i] == '#' {
+			return line[:i]
+		}
+		if isTupleSpace(line[i]) {
+			continue
+		}
+		// '=' — only '"' immediately after it opens a quote, as in parseTuple.
+		i++
+		if i < len(line) && line[i] == '"' {
+			i += quotedValueLen(line[i:])
+			continue
+		}
+		if i >= len(line) {
+			return line
+		}
+		n := bytes.IndexAny(line[i:], "# \t\r\n")
+		if n == -1 {
+			return line
+		}
+		if line[i+n] == '#' {
+			return line[:i+n]
+		}
+		i += n
 	}
 	return line
+}
+
+func isTupleSpace(c byte) bool {
+	return c == ' ' || c == '\t' || c == '\r' || c == '\n'
 }
 
 func hasAttr(recBytes []byte, attr string) bool {
@@ -381,6 +403,10 @@ func parseTuple(p []byte) (Tuple, int, error) {
 	}
 }
 
+// quotedValueLen returns the length of a strconv-quoted value starting at p,
+// including both quotes. p[0] is the opening '"'. An escaped \" does not
+// close the quote; if the closer is missing the result is len(p).
+// stripComment uses this for the same escape rules.
 func quotedValueLen(p []byte) int {
 	escape := false
 	for i := 1; i < len(p); i++ {

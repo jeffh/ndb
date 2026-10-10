@@ -380,6 +380,91 @@ func TestParseEdgeCases(t *testing.T) {
 	})
 }
 
+func TestParseKeepsInchMarkOutsideQuotes(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want Record
+	}{
+		{"inch mark then comment", `size=6" # inches`, MakeRecord("size", `6"`)},
+		{"inch mark then quoted text in comment", `size=6" # see c="x y`, MakeRecord("size", `6"`)},
+		{"quote inside key", `a"b=1 # c`, MakeRecord(`a"b`, "1")},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			db, err := ParseOne([]byte(tc.in))
+			if err != nil {
+				t.Fatalf("ParseOne(%q) unexpected error: %v", tc.in, err)
+			}
+			got := db.AllSlice()
+			if len(got) != 1 {
+				t.Fatalf("expected 1 record from %q, got %d", tc.in, len(got))
+			}
+			if len(got[0]) != len(tc.want) {
+				t.Fatalf("%q: got %d tuples %q, want %d %q", tc.in, len(got[0]), got[0].String(), len(tc.want), tc.want.String())
+			}
+			for i := range tc.want {
+				if got[0][i] != tc.want[i] {
+					t.Fatalf("%q: tuple %d got %+v, want %+v", tc.in, i, got[0][i], tc.want[i])
+				}
+			}
+			if recs := db.SearchSlice(HasAttr(tc.want[0].Attr)); len(recs) != 1 {
+				t.Fatalf("Search(%q) dropped the record from %q, got %d", tc.want[0].Attr, tc.in, len(recs))
+			}
+		})
+	}
+}
+
+func TestStripComment(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"escaped quote", `name="foo\"bar"`, `name="foo\"bar"`},
+		{"escaped quote then hash inside quotes", `name="foo\"#bar"`, `name="foo\"#bar"`},
+		{"value ending in backslash then comment", `key="a\\" # comment`, `key="a\\" `},
+		{"hash immediately after quoted value", `key="v"#c`, `key="v"`},
+		{"unterminated quote keeps hash", `name="foo#bar`, `name="foo#bar`},
+		{"hash in unquoted value", `name=foo#bar`, `name=foo`},
+		{"inch mark is not a quote", `size=6" # inches`, `size=6" `},
+		{"inch mark then later equals-quote in comment", `size=6" # see c="x y`, `size=6" `},
+		{"quote inside key", `a"b=1 # c`, `a"b=1 `},
+		{"equals-quote inside unquoted value", `a=b="c#d"`, `a=b="c`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := string(stripComment([]byte(tc.in)))
+			if got != tc.want {
+				t.Fatalf("stripComment(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestQuotedValueLen(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want int
+	}{
+		{"escaped quote", `"foo\"bar"`, len(`"foo\"bar"`)},
+		{"escaped quote then hash", `"foo\"#bar"`, len(`"foo\"#bar"`)},
+		{"value ending in backslash", `"a\\"`, len(`"a\\"`)},
+		{"hash immediately after closer", `"v"#c`, len(`"v"`)},
+		{"unterminated", `"foo#bar`, len(`"foo#bar`)},
+		{"hash inside quotes", `"foo#bar"`, len(`"foo#bar"`)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := quotedValueLen([]byte(tc.in))
+			if got != tc.want {
+				t.Fatalf("quotedValueLen(%q) = %d, want %d", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestSearchWithSimilarAttributeNames(t *testing.T) {
 	data := `provider=openai model=gpt-4
 provider=anthropic model=claude`

@@ -9,12 +9,18 @@ import (
 	"strconv"
 	"unicode"
 	"unicode/utf8"
+	"unsafe"
 )
 
 type Ndb struct {
 	data  [][]byte
 	files []string
 	sys   FileSystem
+	// copyStrings forces Attr/Val to be copied out of file buffers. ParseOne
+	// sets this so callers who mutate the input after Open still see stable
+	// records they already held. Open/OpenOne own their ReadAll buffers, so
+	// unquoted strings may alias that immutable data.
+	copyStrings bool
 }
 
 // Open opens a new Ndb database from the given file path. It will recursively resolve any
@@ -79,9 +85,10 @@ func ParseOne(p []byte) (*Ndb, error) {
 		return nil, err
 	}
 	return &Ndb{
-		files: []string{"inline"},
-		data:  [][]byte{p},
-		sys:   nil,
+		files:       []string{"inline"},
+		data:        [][]byte{p},
+		sys:         nil,
+		copyStrings: true,
 	}, nil
 }
 
@@ -92,9 +99,9 @@ func ParseOneString(s string) (*Ndb, error) {
 func validateRecords(data []byte) error {
 	var rec Record
 	var firstErr error
-	forEachRawRecord(data, func(recBytes []byte, startLine int) bool {
+	forEachRecordLines(data, func(lines [][]byte, startLine int) bool {
 		rec.zero()
-		if err := parseRecord(recBytes, &rec); err != nil {
+		if err := parseRecordLines(lines, &rec, true); err != nil {
 			firstErr = fmt.Errorf("line %d: %w", startLine, err)
 			return false
 		}
@@ -139,7 +146,7 @@ func (n *Ndb) readFiles(skip int) (int, error) {
 //
 // Use Search to find matching records instead.
 func (n *Ndb) All() iter.Seq[Record] {
-	return n.byPredicate(func(rec []byte) bool { return true })
+	return n.byPredicate(nil)
 }
 
 // AllSlice returns a slice of all records in the database. This isn't
@@ -158,9 +165,12 @@ func (n *Ndb) First(attr, val string) Record {
 
 // Search returns an iterator that yields records matching the given predicates.
 func (n *Ndb) Search(preds ...SearchPredicate) iter.Seq[Record] {
-	return n.byPredicate(func(rec []byte) bool {
+	if len(preds) == 0 {
+		return n.byPredicate(nil)
+	}
+	return n.byPredicate(func(lines [][]byte) bool {
 		for _, pred := range preds {
-			if !pred.match(rec) {
+			if !pred.matchLines(lines) {
 				return false
 			}
 		}
@@ -168,36 +178,56 @@ func (n *Ndb) Search(preds ...SearchPredicate) iter.Seq[Record] {
 	})
 }
 
-type SearchPredicate interface{ match(rec []byte) bool }
-type searchPredicate func(rec []byte) bool
+// SearchPredicate selects records during Search. The interface is sealed:
+// only predicates from this package (HasAttr, HasAttrValue) implement it.
+type SearchPredicate interface {
+	matchLines(lines [][]byte) bool
+}
 
-func (sp searchPredicate) match(rec []byte) bool { return sp(rec) }
+type attrPred struct {
+	eq     []byte // " attr="
+	sp     []byte // " attr "
+	val    string
+	hasVal bool
+}
+
+func (p attrPred) matchLines(lines [][]byte) bool {
+	if !p.hasVal {
+		return hasAttrLines(lines, p.eq, p.sp)
+	}
+	return hasAttrValLines(lines, p.eq, p.sp, p.val)
+}
 
 // HasAttr returns a predicate that matches records with the given attribute.
 func HasAttr(attr string) SearchPredicate {
-	return searchPredicate(func(rec []byte) bool {
-		return hasAttr(rec, attr)
-	})
+	return attrPred{
+		eq: []byte(" " + attr + "="),
+		sp: []byte(" " + attr + " "),
+	}
 }
 
 // HasAttrValue returns a predicate that matches records with the given attribute and value.
 func HasAttrValue(attr, value string) SearchPredicate {
-	return searchPredicate(func(rec []byte) bool {
-		return hasAttrVal(rec, attr, value)
-	})
+	return attrPred{
+		eq:     []byte(" " + attr + "="),
+		sp:     []byte(" " + attr + " "),
+		val:    value,
+		hasVal: true,
+	}
 }
 
-func (n *Ndb) byPredicate(allow func(rec []byte) bool) iter.Seq[Record] {
-	var results Record
+func (n *Ndb) byPredicate(allow func(lines [][]byte) bool) iter.Seq[Record] {
+	copyStr := n.copyStrings
 	return func(yield func(Record) bool) {
+		var results Record
 		for i := range n.data {
 			cont := true
-			forEachRawRecord(n.data[i], func(recBytes []byte, _ int) bool {
-				if !allow(recBytes) {
+			forEachRecordLines(n.data[i], func(lines [][]byte, _ int) bool {
+				if allow != nil && !allow(lines) {
 					return true
 				}
 				results.zero()
-				if err := parseRecord(recBytes, &results); err == nil {
+				if err := parseRecordLines(lines, &results, copyStr); err == nil {
 					if !yield(results) {
 						cont = false
 						return false
@@ -215,7 +245,15 @@ func (n *Ndb) byPredicate(allow func(rec []byte) bool) iter.Seq[Record] {
 func forEachLine(data []byte, fn func(line []byte, lineNo int) bool) {
 	lineNo := 1
 	for len(data) > 0 {
-		line, rest, found := bytes.Cut(data, []byte{'\n'})
+		line := data
+		found := false
+		if i := bytes.IndexByte(data, '\n'); i >= 0 {
+			line = data[:i]
+			data = data[i+1:]
+			found = true
+		} else {
+			data = nil
+		}
 		if n := len(line); n > 0 && line[n-1] == '\r' {
 			line = line[:n-1]
 		}
@@ -225,45 +263,57 @@ func forEachLine(data []byte, fn func(line []byte, lineNo int) bool) {
 		if !found {
 			return
 		}
-		data = rest
 		lineNo++
 	}
 }
 
-func forEachRawRecord(data []byte, fn func(rec []byte, startLine int) bool) {
-	recBytes := []byte{}
+// forEachRecordLines yields each record as comment-stripped, trimmed lines
+// that still point into data. The lines slice is reused; callers must finish
+// with a record before returning.
+func forEachRecordLines(data []byte, fn func(lines [][]byte, startLine int) bool) {
+	var lines [][]byte
 	startLine := 0
 	stopped := false
 	forEachLine(data, func(line []byte, lineNo int) bool {
 		line = stripComment(line)
+		if len(bytes.TrimSpace(line)) == 0 {
+			return true
+		}
+		if isRecordStart(line) && len(lines) > 0 {
+			if !fn(lines, startLine) {
+				stopped = true
+				return false
+			}
+			lines = lines[:0]
+		}
+		line = bytes.TrimSpace(line)
 		if len(line) == 0 {
 			return true
 		}
-		first, _ := utf8.DecodeRune(line)
-		if !unicode.IsSpace(first) {
-			if len(recBytes) > 0 {
-				if !fn(recBytes, startLine) {
-					stopped = true
-					return false
-				}
-			}
-			recBytes = recBytes[:0]
+		if len(lines) == 0 {
 			startLine = lineNo
 		}
-		line = bytes.TrimSpace(line)
-		if len(line) > 0 {
-			if len(recBytes) == 0 {
-				recBytes = append(recBytes, ' ')
-				startLine = lineNo
-			}
-			recBytes = append(recBytes, line...)
-			recBytes = append(recBytes, ' ')
-		}
+		lines = append(lines, line)
 		return true
 	})
-	if !stopped && len(recBytes) > 0 {
-		fn(recBytes, startLine)
+	if !stopped && len(lines) > 0 {
+		fn(lines, startLine)
 	}
+}
+
+func isRecordStart(line []byte) bool {
+	if len(line) == 0 {
+		return false
+	}
+	if line[0] < utf8.RuneSelf {
+		return !isASCIISpace(line[0])
+	}
+	first, _ := utf8.DecodeRune(line)
+	return !unicode.IsSpace(first)
+}
+
+func isASCIISpace(c byte) bool {
+	return c == ' ' || c == '\t' || c == '\n' || c == '\v' || c == '\f' || c == '\r'
 }
 
 // stripComment cuts an unquoted '#' comment through end of line, matching
@@ -271,6 +321,9 @@ func forEachRawRecord(data []byte, fn func(rec []byte, startLine int) bool) {
 // byte after '='. Quoted spans are measured with quotedValueLen so both
 // helpers share the same \" escape scan.
 func stripComment(line []byte) []byte {
+	if len(line) == 0 || bytes.IndexByte(line, '#') < 0 {
+		return line
+	}
 	i := 0
 	for i < len(line) {
 		for i < len(line) && isTupleSpace(line[i]) {
@@ -282,7 +335,7 @@ func stripComment(line []byte) []byte {
 		if line[i] == '#' {
 			return line[:i]
 		}
-		end := bytes.IndexAny(line[i:], "=# \t\r\n")
+		end := indexByte6(line[i:], '=', '#', ' ', '\t', '\r', '\n')
 		if end == -1 {
 			return line
 		}
@@ -302,7 +355,7 @@ func stripComment(line []byte) []byte {
 		if i >= len(line) {
 			return line
 		}
-		n := bytes.IndexAny(line[i:], "# \t\r\n")
+		n := indexByte5(line[i:], '#', ' ', '\t', '\r', '\n')
 		if n == -1 {
 			return line
 		}
@@ -318,24 +371,24 @@ func isTupleSpace(c byte) bool {
 	return c == ' ' || c == '\t' || c == '\r' || c == '\n'
 }
 
-func hasAttr(recBytes []byte, attr string) bool {
-	attrKey := []byte(" " + attr + "=")
-	if bytes.Contains(recBytes, attrKey) {
-		return true
+func hasAttrLines(lines [][]byte, attrEq, attrSp []byte) bool {
+	for _, line := range lines {
+		if spaceFramedContains(line, attrEq) || spaceFramedContains(line, attrSp) {
+			return true
+		}
 	}
-	return bytes.Contains(recBytes, []byte(" "+attr+" "))
+	return false
 }
 
-func hasAttrVal(recBytes []byte, attr, value string) bool {
-	attrKey := []byte(" " + attr + "=")
+func hasAttrValKeys(recBytes, attrEq, attrSp []byte, value string) bool {
 	off := 0
 	for off < len(recBytes) {
-		idx := bytes.Index(recBytes[off:], attrKey)
+		idx := bytes.Index(recBytes[off:], attrEq)
 		if idx == -1 {
-			return len(value) == 0 && bytes.Contains(recBytes, []byte(" "+attr+" "))
+			return len(value) == 0 && bytes.Contains(recBytes, attrSp)
 		}
 		off += idx + 1
-		tup, n, err := parseTuple(recBytes[off:])
+		tup, n, err := parseTuple(recBytes[off:], false)
 		if err == nil && tup.Val == value {
 			return true
 		}
@@ -347,60 +400,280 @@ func hasAttrVal(recBytes []byte, attr, value string) bool {
 	return false
 }
 
-func parseRecord(recBytes []byte, results *Record) error {
-	if !utf8.Valid(recBytes) {
-		return fmt.Errorf("invalid utf8 rune")
+func hasAttrValLines(lines [][]byte, attrEq, attrSp []byte, value string) bool {
+	for i, line := range lines {
+		from := 0
+		for {
+			idx := indexFramed(line, attrEq, from)
+			if idx < 0 {
+				break
+			}
+			p := line[idx:]
+			if needJoinForQuote(p) && i+1 < len(lines) {
+				joined := joinFrom(lines[i:], idx)
+				if hasAttrValKeys(joined, attrEq, attrSp, value) {
+					return true
+				}
+				break
+			}
+			tup, n, err := parseTuple(p, false)
+			if err == nil && tup.Val == value {
+				return true
+			}
+			if n <= 0 {
+				break
+			}
+			from = idx + 1
+		}
 	}
+	if len(value) == 0 {
+		for _, line := range lines {
+			if spaceFramedContains(line, attrSp) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// spaceFramedContains reports whether key occurs in (" " + line + " ")
+// without allocating that framed copy. Keys used here always start with space.
+func spaceFramedContains(line, key []byte) bool {
+	if len(key) == 0 {
+		return true
+	}
+	if bytes.Contains(line, key) {
+		return true
+	}
+	if key[0] == ' ' && bytes.HasPrefix(line, key[1:]) {
+		return true
+	}
+	if key[len(key)-1] == ' ' && bytes.HasSuffix(line, key[:len(key)-1]) {
+		return true
+	}
+	if key[0] == ' ' && key[len(key)-1] == ' ' && bytes.Equal(line, key[1:len(key)-1]) {
+		return true
+	}
+	return false
+}
+
+// indexFramed finds key in (" " + line + " ") and returns the line index of
+// the attribute name (the byte after key's leading space). key must start
+// with space (as in " attr="). from is a line index to resume after a hit.
+func indexFramed(line, key []byte, from int) int {
+	if len(key) == 0 {
+		return from
+	}
+	if from <= 0 && key[0] == ' ' && bytes.HasPrefix(line, key[1:]) {
+		return 0
+	}
+	start := from
+	if start < 0 {
+		start = 0
+	}
+	if start < len(line) {
+		if i := bytes.Index(line[start:], key); i >= 0 {
+			return start + i + 1 // skip the space in key
+		}
+	}
+	if key[len(key)-1] == ' ' {
+		bare := key[:len(key)-1] // " attr"
+		if bytes.HasSuffix(line, bare) {
+			idx := len(line) - len(bare) + 1
+			if idx >= from {
+				return idx
+			}
+		}
+	}
+	return -1
+}
+
+func needJoinForQuote(p []byte) bool {
+	end := indexByte4(p, '=', ' ', '\t', '\n')
+	if end < 0 || p[end] != '=' {
+		return false
+	}
+	vs := end + 1
+	if vs >= len(p) || p[vs] != '"' {
+		return false
+	}
+	q := p[vs:]
+	return quotedValueLen(q) == len(q) && (len(q) < 2 || q[len(q)-1] != '"')
+}
+
+func joinFrom(lines [][]byte, idx int) []byte {
+	var buf []byte
+	buf = append(buf, ' ')
+	if idx > 0 && idx <= len(lines[0]) {
+		buf = append(buf, lines[0][idx:]...)
+	} else {
+		buf = append(buf, lines[0]...)
+	}
+	buf = append(buf, ' ')
+	for _, line := range lines[1:] {
+		buf = append(buf, line...)
+		buf = append(buf, ' ')
+	}
+	return buf
+}
+
+func parseRecordLines(lines [][]byte, results *Record, copyStr bool) error {
 	if *results == nil {
 		*results = make(Record, 0, 10)
 	}
-	r := recBytes
-	for len(r) > 0 {
-		ch, size := utf8.DecodeRune(r)
-		if ch == utf8.RuneError {
+	var leftover []byte
+	for i, line := range lines {
+		p := line
+		if leftover != nil {
+			leftover = append(leftover, ' ')
+			leftover = append(leftover, line...)
+			p = leftover
+			copyStr = true
+		}
+		if !utf8.Valid(p) {
 			return fmt.Errorf("invalid utf8 rune")
 		}
-		if unicode.IsSpace(ch) {
-			r = r[size:]
-			continue
+		for len(p) > 0 {
+			if p[0] < utf8.RuneSelf {
+				if isASCIISpace(p[0]) {
+					p = p[1:]
+					continue
+				}
+			} else {
+				ch, size := utf8.DecodeRune(p)
+				if ch == utf8.RuneError {
+					return fmt.Errorf("invalid utf8 rune")
+				}
+				if unicode.IsSpace(ch) {
+					p = p[size:]
+					continue
+				}
+			}
+			if leftover == nil && needJoinForQuote(p) && i+1 < len(lines) {
+				leftover = append(leftover[:0], p...)
+				break
+			}
+			tup, n, err := parseTuple(p, copyStr)
+			if err != nil {
+				if leftover == nil && i+1 < len(lines) {
+					leftover = append(leftover[:0], p...)
+					break
+				}
+				return err
+			}
+			*results = append(*results, tup)
+			p = p[n:]
+			leftover = nil
 		}
-		tup, n, err := parseTuple(r)
+	}
+	if leftover != nil {
+		if !utf8.Valid(leftover) {
+			return fmt.Errorf("invalid utf8 rune")
+		}
+		tup, n, err := parseTuple(leftover, true)
 		if err != nil {
 			return err
 		}
 		*results = append(*results, tup)
-		r = r[n:]
+		rest := leftover[n:]
+		for len(rest) > 0 {
+			if rest[0] < utf8.RuneSelf {
+				if isASCIISpace(rest[0]) {
+					rest = rest[1:]
+					continue
+				}
+			} else {
+				ch, size := utf8.DecodeRune(rest)
+				if ch == utf8.RuneError {
+					return fmt.Errorf("invalid utf8 rune")
+				}
+				if unicode.IsSpace(ch) {
+					rest = rest[size:]
+					continue
+				}
+			}
+			tup, n, err := parseTuple(rest, true)
+			if err != nil {
+				return err
+			}
+			*results = append(*results, tup)
+			rest = rest[n:]
+		}
 	}
 	return nil
 }
 
-func parseTuple(p []byte) (Tuple, int, error) {
-	end := bytes.IndexAny(p, "= \t\r\n")
+func parseTuple(p []byte, copyStr bool) (Tuple, int, error) {
+	end := indexByte5(p, '=', ' ', '\t', '\r', '\n')
 	if end == -1 {
-		return Tuple{string(p), ""}, len(p), nil
+		return Tuple{cloneString(p, copyStr), ""}, len(p), nil
 	}
-	attr := string(p[:end])
+	attr := cloneString(p[:end], copyStr)
 	if p[end] != '=' {
 		return Tuple{attr, ""}, end, nil
-	} else {
-		valueStart := end + 1
-		firstValue, _ := utf8.DecodeRune(p[valueStart:])
-		if firstValue == '"' {
-			length := quotedValueLen(p[valueStart:])
-			actualValue, err := strconv.Unquote(string(p[valueStart : valueStart+length]))
-			if err != nil {
-				return Tuple{}, valueStart + length, err
-			}
-			return Tuple{attr, actualValue}, valueStart + length, nil
-		} else {
-			length := bytes.IndexAny(p[valueStart:], " \t\r\n")
-			if length == -1 {
-				length = len(p) - valueStart
-			}
+	}
+	valueStart := end + 1
+	if valueStart < len(p) && p[valueStart] == '"' {
+		length := quotedValueLen(p[valueStart:])
+		q := p[valueStart : valueStart+length]
+		if length >= 2 && q[length-1] == '"' && bytes.IndexByte(q, '\\') < 0 {
+			return Tuple{attr, cloneString(q[1:length-1], copyStr)}, valueStart + length, nil
+		}
+		actualValue, err := strconv.Unquote(bytesToString(q))
+		if err != nil {
+			return Tuple{}, valueStart + length, err
+		}
+		return Tuple{attr, actualValue}, valueStart + length, nil
+	}
+	length := indexByte4(p[valueStart:], ' ', '\t', '\r', '\n')
+	if length == -1 {
+		length = len(p) - valueStart
+	}
+	return Tuple{attr, cloneString(p[valueStart:valueStart+length], copyStr)}, valueStart + length, nil
+}
 
-			return Tuple{attr, string(p[valueStart : valueStart+length])}, valueStart + length, nil
+func cloneString(b []byte, copyStr bool) string {
+	if len(b) == 0 {
+		return ""
+	}
+	if copyStr {
+		return string(b)
+	}
+	return unsafe.String(unsafe.SliceData(b), len(b))
+}
+
+func bytesToString(b []byte) string {
+	if len(b) == 0 {
+		return ""
+	}
+	return unsafe.String(unsafe.SliceData(b), len(b))
+}
+
+func indexByte4(p []byte, a, b, c, d byte) int {
+	for i, x := range p {
+		if x == a || x == b || x == c || x == d {
+			return i
 		}
 	}
+	return -1
+}
+
+func indexByte5(p []byte, a, b, c, d, e byte) int {
+	for i, x := range p {
+		if x == a || x == b || x == c || x == d || x == e {
+			return i
+		}
+	}
+	return -1
+}
+
+func indexByte6(p []byte, a, b, c, d, e, f byte) int {
+	for i, x := range p {
+		if x == a || x == b || x == c || x == d || x == e || x == f {
+			return i
+		}
+	}
+	return -1
 }
 
 // quotedValueLen returns the length of a strconv-quoted value starting at p,

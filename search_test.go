@@ -1,6 +1,8 @@
 package ndb
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -302,6 +304,115 @@ func TestSearchDuplicateAttrLaterValue(t *testing.T) {
 			t.Fatalf("expected sys=a, got %s", records[0].Get("sys"))
 		}
 	})
+}
+
+func TestHeldRecordStableAcrossIteration(t *testing.T) {
+	var b strings.Builder
+	for i := 0; i < 200; i++ {
+		fmt.Fprintf(&b, "ip=10.0.0.%d sys=host%d\n", i, i)
+	}
+	db := mustOpenOne(t, &MemoryFileSystem{Files: map[string]string{"t.ndb": b.String()}}, "t.ndb")
+
+	var held Record
+	var heldIP, heldSys string
+	n := 0
+	for rec := range db.All() {
+		if n == 0 {
+			held = rec.Copy()
+			heldIP = rec.Get("ip")
+			heldSys = rec.Get("sys")
+		}
+		n++
+	}
+	if n != 200 {
+		t.Fatalf("All()=%d want 200", n)
+	}
+	if held.Get("ip") != "10.0.0.0" || heldIP != "10.0.0.0" {
+		t.Fatalf("held ip corrupted: rec=%q str=%q", held.Get("ip"), heldIP)
+	}
+	if held.Get("sys") != "host0" || heldSys != "host0" {
+		t.Fatalf("held sys corrupted: rec=%q str=%q", held.Get("sys"), heldSys)
+	}
+
+	later := db.SearchSlice(HasAttrValue("sys", "host199"))
+	if len(later) != 1 || later[0].Get("ip") != "10.0.0.199" {
+		t.Fatalf("later search broken: %+v", later)
+	}
+	if held.Get("ip") != "10.0.0.0" || heldIP != "10.0.0.0" {
+		t.Fatalf("held values changed after later search: %q %q", held.Get("ip"), heldIP)
+	}
+}
+
+func TestParseOneHeldRecordIndependentOfInputMutation(t *testing.T) {
+	data := []byte("name=John age=30")
+	db, err := ParseOne(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	held := db.AllSlice()
+	if len(held) != 1 || held[0].Get("name") != "John" {
+		t.Fatalf("setup: %+v", held)
+	}
+	name := held[0].Get("name")
+
+	copy(data, []byte("name=XXXX age=30"))
+	if name != "John" || held[0].Get("name") != "John" {
+		t.Fatalf("held ParseOne record aliased caller buffer: name=%q rec=%q", name, held[0].Get("name"))
+	}
+
+	again := db.AllSlice()
+	if len(again) != 1 || again[0].Get("name") != "XXXX" {
+		t.Fatalf("re-parse should see mutated ParseOne buffer, got %+v", again)
+	}
+	if held[0].Get("name") != "John" {
+		t.Fatalf("already-held record should stay John, got %q", held[0].Get("name"))
+	}
+}
+
+func TestHasAttrMatchesQuotedValueContains(t *testing.T) {
+	db, err := ParseOneString(`note=" sys=foo " extra=1`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Concat-style search is a substring scan, so a quoted value can still match.
+	if got := db.SearchSlice(HasAttr("sys")); len(got) != 1 {
+		t.Fatalf("HasAttr(sys) in quoted value: got %d", len(got))
+	}
+	if got := db.SearchSlice(HasAttrValue("sys", "foo")); len(got) != 1 {
+		t.Fatalf("HasAttrValue(sys, foo) in quoted value: got %d", len(got))
+	}
+}
+
+func TestSearchHasAttrMatchesHasKey(t *testing.T) {
+	data := `person name=John
+	age=30
+company name=Acme
+dhcp
+bare
+sys=a ip=1.2.3.4 ip=5.6.7.8
+note="a b # c" other=z`
+	db, err := ParseOneString(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys := map[string]struct{}{}
+	for rec := range db.All() {
+		for i := 0; i < rec.Len(); i++ {
+			keys[rec.KeyAt(i)] = struct{}{}
+		}
+	}
+	for key := range keys {
+		want := 0
+		for rec := range db.All() {
+			if rec.HasKey(key) {
+				want++
+			}
+		}
+		got := len(db.SearchSlice(HasAttr(key)))
+		if got != want {
+			t.Fatalf("HasAttr(%q)=%d want %d (HasKey filter)", key, got, want)
+		}
+	}
 }
 
 func TestSearchSlice(t *testing.T) {

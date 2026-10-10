@@ -380,6 +380,26 @@ func TestParseEdgeCases(t *testing.T) {
 	})
 }
 
+func TestParseMultilineQuotedValue(t *testing.T) {
+	db, err := ParseOneString("person name=\"John\n\tDoe\" age=30")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	recs := db.AllSlice()
+	if len(recs) != 1 {
+		t.Fatalf("expected 1 record, got %d", len(recs))
+	}
+	if recs[0].Get("name") != "John Doe" {
+		t.Fatalf("expected joined quoted value 'John Doe', got %q", recs[0].Get("name"))
+	}
+	if recs[0].Get("age") != "30" {
+		t.Fatalf("expected age=30, got %q", recs[0].Get("age"))
+	}
+	if got := db.SearchSlice(HasAttrValue("name", "John Doe")); len(got) != 1 {
+		t.Fatalf("HasAttrValue missed multiline quoted name, got %d", len(got))
+	}
+}
+
 func TestParseKeepsInchMarkOutsideQuotes(t *testing.T) {
 	cases := []struct {
 		name string

@@ -736,32 +736,8 @@ func bytesToString(b []byte) string {
 	return unsafe.String(unsafe.SliceData(b), len(b))
 }
 
-func indexByte4(p []byte, a, b, c, d byte) int {
-	for i, x := range p {
-		if x == a || x == b || x == c || x == d {
-			return i
-		}
-	}
-	return -1
-}
-
-func indexByte5(p []byte, a, b, c, d, e byte) int {
-	for i, x := range p {
-		if x == a || x == b || x == c || x == d || x == e {
-			return i
-		}
-	}
-	return -1
-}
-
-func indexByte6(p []byte, a, b, c, d, e, f byte) int {
-	for i, x := range p {
-		if x == a || x == b || x == c || x == d || x == e || x == f {
-			return i
-		}
-	}
-	return -1
-}
+// indexByte4/5/6 are defined in scan_index_nosimd.go (default, inlinable
+// scalar loops) or scan_index_simd.go (GOEXPERIMENT=simd).
 
 // quotedValueLen returns the length of a strconv-quoted value starting at p,
 // including both quotes. p[0] is the opening '"'. An escaped \" does not

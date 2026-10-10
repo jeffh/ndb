@@ -54,3 +54,23 @@ jobs:
       with:
         name: binaries
         path: bin/*
+
+  # Optional: exercise Go 1.27's experimental simd/archsimd path.
+  # Not a required status check. Default Test/Build stay GOEXPERIMENT-free.
+  test-simd:
+    name: Test SIMD
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version-file: go.mod
+        cache: true
+
+    - name: Run tests with GOEXPERIMENT=simd
+      env:
+        GOEXPERIMENT: simd
+      run: go test -race -count=1 ./...

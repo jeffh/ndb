@@ -371,21 +371,16 @@ func TestParseOneHeldRecordIndependentOfInputMutation(t *testing.T) {
 
 func TestHasAttrValueFindsConcatMatchInsideClosedQuote(t *testing.T) {
 	// k="x a=" is a closed quote, so a=" is not a top-level tuple.
-	// Main's concat scan still treats that closer as an opening quote
-	// that runs onto the next line: HasAttrValue("a", " foo") hits.
 	in := "k=\"x a=\"\n\tfoo\"\n"
 	db, err := ParseOne([]byte(in))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got := db.SearchSlice(HasAttrValue("a", " foo")); len(got) != 1 {
-		t.Fatalf("HasAttrValue(a, \" foo\") should match main's concat scan, got %d", len(got))
+		t.Fatalf("HasAttrValue(a, \" foo\") got %d", len(got))
 	}
 	if got := db.SearchSlice(HasAttrValue("k", "x a=")); len(got) != 1 {
 		t.Fatalf("HasAttrValue(k, x a=) got %d", len(got))
-	}
-	if got := mainSearchHasAttrValue([]byte(in), "a", " foo"); len(got) != 1 {
-		t.Fatalf("setup: main should also match, got %d", len(got))
 	}
 }
 
@@ -410,8 +405,6 @@ func TestHasAttrValueFindsTupleAfterFalseJoin(t *testing.T) {
 }
 
 func TestHasAttrValueDoesNotRescanContinuationInsideMultilineQuote(t *testing.T) {
-	// 48e6fd4: after joining a real multiline quote, do not rescan later
-	// lines as new tuples. Matches main: ip="a\n\tip=1 b" is one value.
 	in := "ip=\"a\n\tip=1 b\"\n"
 	db, err := ParseOne([]byte(in))
 	if err != nil {
@@ -419,9 +412,6 @@ func TestHasAttrValueDoesNotRescanContinuationInsideMultilineQuote(t *testing.T)
 	}
 	if got := db.SearchSlice(HasAttrValue("ip", "1")); len(got) != 0 {
 		t.Fatalf("HasAttrValue(ip, 1) should not match inside a multiline quoted value, got %d (%q)", len(got), got[0].String())
-	}
-	if got := mainSearchHasAttrValue([]byte(in), "ip", "1"); len(got) != 0 {
-		t.Fatalf("setup: main should also miss ip=1 inside the quote, got %d", len(got))
 	}
 	if got := db.SearchSlice(HasAttrValue("ip", "a ip=1 b")); len(got) != 1 {
 		t.Fatalf("HasAttrValue(ip, exact multiline value) got %d", len(got))
@@ -502,7 +492,6 @@ person name=Jane`,
 		t.Fatalf("expected 2 records, got %d", len(records))
 	}
 
-	// Verify that modifying one record doesn't affect the other
 	records[0].Put(Tuple{"age", "30"})
 	if records[1].HasKey("age") {
 		t.Fatalf("modifying one record should not affect another")

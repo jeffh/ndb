@@ -121,10 +121,8 @@ func TestRecordCopy(t *testing.T) {
 		t.Fatalf("expected copy to be equal")
 	}
 
-	// Modify the copy
 	r2.Put(Tuple{"name", "Jane"})
 
-	// Verify original is unchanged
 	if r.Get("name") != "John" {
 		t.Fatalf("expected original to be unchanged, got %s", r.Get("name"))
 	}

@@ -10,7 +10,6 @@ import (
 var exampleFiles embed.FS
 
 func TestReadingFromEmbedFS(t *testing.T) {
-	// Create a wrapper for embed.FS to implement our FileSystem interface
 	m := &embedFSWrapper{efs: exampleFiles}
 	t.Run("Open properly opens recursively", func(t *testing.T) {
 		db := mustOpen(t, m, "example/start.ndb")
@@ -179,6 +178,5 @@ func (w *embedFSWrapper) Open(filename string) (io.ReadCloser, error) {
 	if err != nil {
 		return nil, err
 	}
-	// fs.File implements both Read and Close
 	return f.(io.ReadCloser), nil
 }

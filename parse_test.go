@@ -622,8 +622,8 @@ func TestContinuationJoinScaling(t *testing.T) {
 	root := "database file=\"" + strings.Repeat("\n\tx", n)
 	fs = &MemoryFileSystem{Files: map[string]string{"root.ndb": root}}
 	start = time.Now()
-	if _, err := Open(fs, "root.ndb"); err != nil {
-		t.Fatalf("Open: %v", err)
+	if _, err := Open(fs, "root.ndb"); err == nil {
+		t.Fatal("Open: expected error for unterminated database-file quote")
 	}
 	openDB := time.Since(start)
 	if openDB > bound {

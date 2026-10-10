@@ -2,7 +2,9 @@ package ndb
 
 import (
 	"os"
+	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestFileNotFound(t *testing.T) {
@@ -218,4 +220,104 @@ func TestFileSystemInterface(t *testing.T) {
 			t.Fatalf("expected os.ErrNotExist, got %v", err)
 		}
 	})
+}
+
+func TestOpenAndOpenOneRejectInvalidRecords(t *testing.T) {
+	unterm := "ok=1\nperson name=\"nope"
+	utf8bad := string(append([]byte("ok=1\nperson name="), 0xff))
+	if utf8.Valid([]byte(utf8bad)) {
+		t.Fatal("precondition failed: utf8 fixture is valid utf8")
+	}
+
+	cases := []struct {
+		name string
+		data string
+		want string
+	}{
+		{"unterminated quote", unterm, "line 2"},
+		{"invalid utf8", utf8bad, "line 2"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name+"/OpenOne", func(t *testing.T) {
+			fs := &MemoryFileSystem{Files: map[string]string{"bad.ndb": tc.data}}
+			db, err := OpenOne(fs, "bad.ndb")
+			if err == nil {
+				t.Fatalf("expected error, got AllSlice=%v", db.AllSlice())
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("expected %q in error, got %v", tc.want, err)
+			}
+		})
+		t.Run(tc.name+"/Open", func(t *testing.T) {
+			fs := &MemoryFileSystem{Files: map[string]string{"bad.ndb": tc.data}}
+			db, err := Open(fs, "bad.ndb")
+			if err == nil {
+				t.Fatalf("expected error, got AllSlice=%v", db.AllSlice())
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("expected %q in error, got %v", tc.want, err)
+			}
+		})
+	}
+}
+
+func TestOpenRejectsInvalidReferencedFile(t *testing.T) {
+	fs := &MemoryFileSystem{
+		Files: map[string]string{
+			"start.ndb": "database= file=bad.ndb",
+			"bad.ndb":   "ok=1\nperson name=\"nope",
+		},
+	}
+	_, err := Open(fs, "start.ndb")
+	if err == nil {
+		t.Fatal("expected error for invalid referenced file")
+	}
+	if !strings.Contains(err.Error(), "line 2") {
+		t.Fatalf("expected line 2 in error, got %v", err)
+	}
+}
+
+func TestOpenDoesNotFollowFileFromQuotedDatabaseSubstring(t *testing.T) {
+	fs := &MemoryFileSystem{
+		Files: map[string]string{
+			"start.ndb": `sys=host note="see database " file=other.ndb`,
+			"other.ndb": `person name=ShouldNotLoad`,
+		},
+	}
+	db, err := Open(fs, "start.ndb")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := db.SearchSlice(HasAttr("person")); len(got) != 0 {
+		t.Fatalf("Open loaded other.ndb from a quoted database substring: %v", got)
+	}
+	all := db.AllSlice()
+	if len(all) != 1 {
+		t.Fatalf("expected 1 record from start.ndb, got %d (%v)", len(all), all)
+	}
+	if !all[0].HasKey("sys") || all[0].HasKey("database") {
+		t.Fatalf("expected the host record, not a database record: %v", all[0])
+	}
+}
+
+func TestOpenFollowsRealDatabaseRecordBesideQuotedSubstring(t *testing.T) {
+	fs := &MemoryFileSystem{
+		Files: map[string]string{
+			"start.ndb": `sys=host note="see database " file=decoy.ndb
+database= file=real.ndb`,
+			"decoy.ndb": `person name=Decoy`,
+			"real.ndb":  `person name=Real`,
+		},
+	}
+	db, err := Open(fs, "start.ndb")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	records := db.SearchSlice(HasAttr("person"))
+	if len(records) != 1 {
+		t.Fatalf("expected 1 person record from real.ndb, got %d (%v)", len(records), records)
+	}
+	if records[0].Get("name") != "Real" {
+		t.Fatalf("expected name=Real, got %v", records[0])
+	}
 }

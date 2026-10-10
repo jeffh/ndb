@@ -246,6 +246,38 @@ func TestRecordString(t *testing.T) {
 	})
 }
 
+func TestRecordStringRoundTrip(t *testing.T) {
+	cases := []struct {
+		name string
+		rec  Record
+	}{
+		{"quote and hash", MakeRecord("name", `foo"bar`, "hash", "a#b")},
+		{"backslash", MakeRecord("path", `C:\temp`)},
+		{"u+0080", MakeRecord("name", string(rune(0x80)))},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := tc.rec.String()
+			db, err := ParseOneString(s)
+			if err != nil {
+				t.Fatalf("ParseOneString(%q) unexpected error: %v", s, err)
+			}
+			got := db.AllSlice()
+			if len(got) != 1 {
+				t.Fatalf("expected 1 record from %q, got %d", s, len(got))
+			}
+			if len(got[0]) != len(tc.rec) {
+				t.Fatalf("record %q: got %d tuples, want %d (%q)", s, len(got[0]), len(tc.rec), got[0].String())
+			}
+			for i := range tc.rec {
+				if got[0][i] != tc.rec[i] {
+					t.Fatalf("record %q: tuple %d got %+v, want %+v", s, i, got[0][i], tc.rec[i])
+				}
+			}
+		})
+	}
+}
+
 func TestRecordIndexAccessors(t *testing.T) {
 	r := MakeRecord("name", "John", "age", "30")
 

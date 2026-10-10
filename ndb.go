@@ -235,9 +235,7 @@ func forEachRawRecord(data []byte, fn func(rec []byte, startLine int) bool) {
 	startLine := 0
 	stopped := false
 	forEachLine(data, func(line []byte, lineNo int) bool {
-		if i := bytes.IndexByte(line, '#'); i != -1 {
-			line = line[:i]
-		}
+		line = stripComment(line)
 		if len(line) == 0 {
 			return true
 		}
@@ -266,6 +264,58 @@ func forEachRawRecord(data []byte, fn func(rec []byte, startLine int) bool) {
 	if !stopped && len(recBytes) > 0 {
 		fn(recBytes, startLine)
 	}
+}
+
+// stripComment cuts an unquoted '#' comment through end of line, matching
+// parseTuple's quote rule: a quoted value starts only when '"' is the first
+// byte after '='. Quoted spans are measured with quotedValueLen so both
+// helpers share the same \" escape scan.
+func stripComment(line []byte) []byte {
+	i := 0
+	for i < len(line) {
+		for i < len(line) && isTupleSpace(line[i]) {
+			i++
+		}
+		if i >= len(line) {
+			return line
+		}
+		if line[i] == '#' {
+			return line[:i]
+		}
+		end := bytes.IndexAny(line[i:], "=# \t\r\n")
+		if end == -1 {
+			return line
+		}
+		i += end
+		if line[i] == '#' {
+			return line[:i]
+		}
+		if isTupleSpace(line[i]) {
+			continue
+		}
+		// '=' — only '"' immediately after it opens a quote, as in parseTuple.
+		i++
+		if i < len(line) && line[i] == '"' {
+			i += quotedValueLen(line[i:])
+			continue
+		}
+		if i >= len(line) {
+			return line
+		}
+		n := bytes.IndexAny(line[i:], "# \t\r\n")
+		if n == -1 {
+			return line
+		}
+		if line[i+n] == '#' {
+			return line[:i+n]
+		}
+		i += n
+	}
+	return line
+}
+
+func isTupleSpace(c byte) bool {
+	return c == ' ' || c == '\t' || c == '\r' || c == '\n'
 }
 
 func hasAttr(recBytes []byte, attr string) bool {
@@ -336,13 +386,7 @@ func parseTuple(p []byte) (Tuple, int, error) {
 		valueStart := end + 1
 		firstValue, _ := utf8.DecodeRune(p[valueStart:])
 		if firstValue == '"' {
-			length := bytes.IndexAny(p[valueStart+1:], "\"")
-			if length == -1 {
-				length = len(p) - valueStart
-			} else {
-				length += 2 // 1 for starting quote, and 1 for ending quote
-			}
-
+			length := quotedValueLen(p[valueStart:])
 			actualValue, err := strconv.Unquote(string(p[valueStart : valueStart+length]))
 			if err != nil {
 				return Tuple{}, valueStart + length, err
@@ -357,6 +401,29 @@ func parseTuple(p []byte) (Tuple, int, error) {
 			return Tuple{attr, string(p[valueStart : valueStart+length])}, valueStart + length, nil
 		}
 	}
+}
+
+// quotedValueLen returns the length of a strconv-quoted value starting at p,
+// including both quotes. p[0] is the opening '"'. An escaped \" does not
+// close the quote; if the closer is missing the result is len(p).
+// stripComment uses this for the same escape rules.
+func quotedValueLen(p []byte) int {
+	escape := false
+	for i := 1; i < len(p); i++ {
+		c := p[i]
+		if escape {
+			escape = false
+			continue
+		}
+		if c == '\\' {
+			escape = true
+			continue
+		}
+		if c == '"' {
+			return i + 1
+		}
+	}
+	return len(p)
 }
 
 func toSlice(it iter.Seq[Record]) []Record {

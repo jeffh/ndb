@@ -4,6 +4,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 type Tuple struct {
@@ -93,7 +94,8 @@ func (r Record) String() string {
 
 func needsQuote(s string) bool {
 	for _, r := range s {
-		if r == ' ' || r == '\t' || r == '\n' || r == '\r' || r == '=' || r > 128 {
+		if r == ' ' || r == '\t' || r == '\n' || r == '\r' || r == '=' ||
+			r == '"' || r == '\\' || r == '#' || r >= utf8.RuneSelf {
 			return true
 		}
 	}

@@ -701,11 +701,14 @@ func TestContinuationJoinIsLinear(t *testing.T) {
 		return best
 	}
 
-	const n = 25000
+	// 80k is large enough that t1 is several milliseconds even without
+	// -race, so the 4x check always runs. Scaling's 100k/5s bound is the
+	// hard CI guard; this only flags a roughly-quadratic doubling.
+	const n = 80000
 	t1 := timeN(n)
 	t2 := timeN(2 * n)
 	t.Logf("n=%d %s; 2n=%d %s (ratio %.2f)", n, t1, 2*n, t2, float64(t2)/float64(t1))
-	if t1 >= 2*time.Millisecond && t2 >= 4*t1 {
+	if t2 >= 4*t1 {
 		t.Fatalf("doubling %d→%d: %s → %s (≈4x or worse; want closer to 2x)", n, 2*n, t1, t2)
 	}
 }

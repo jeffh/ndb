@@ -220,6 +220,9 @@ func HasAttr(attr string) SearchPredicate {
 }
 
 // HasAttrValue returns a predicate that matches records with the given attribute and value.
+// In multi-line records it can also match attr=value text inside another
+// attribute's continued quoted value (same concat-scan behavior as on main).
+// For example, `b="multi\n\ta=1 z"` matches HasAttrValue("a", "1").
 func HasAttrValue(attr, value string) SearchPredicate {
 	return attrPred{
 		eq:     []byte(" " + attr + "="),

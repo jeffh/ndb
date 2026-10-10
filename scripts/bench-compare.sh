@@ -84,7 +84,14 @@ BASE_SHA="$(git rev-parse "$BASE")"
 WORKTREE="$(mktemp -d "${TMPDIR:-/tmp}/ndb-bench-XXXXXX")"
 git worktree add --detach "$WORKTREE" "$BASE_SHA"
 
-echo "=== base ($BASE = $BASE_SHA) ==="
+# Run HEAD's benchmark harness against the base library. Production files
+# stay at $BASE; only *_test.go benches (and this script's peers) are overlaid
+# so a new bench still compares main vs HEAD.
+if [[ -f "$ROOT/bench_test.go" ]]; then
+  cp "$ROOT/bench_test.go" "$WORKTREE/bench_test.go"
+fi
+
+echo "=== base ($BASE = $BASE_SHA, HEAD bench harness) ==="
 run_benches "$WORKTREE" "$OLD_TXT"
 
 echo "=== HEAD ($(git rev-parse --short HEAD), working tree) ==="

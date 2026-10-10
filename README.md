@@ -222,7 +222,7 @@ Medium and large cases also report custom metrics from a **separate** pass after
 - `peak-sys-B` — max `MemStats.Sys` (bytes the runtime obtained from the OS).
 - `peak-rss-B` — max Linux RSS from `/proc/self/statm` (resident pages × page size). Includes non-Go mappings; treat it as process footprint, not as `B/op`.
 
-Compare the working tree to `origin/main` with [benchstat](https://pkg.go.dev/golang.org/x/perf/cmd/benchstat) (the script creates a detached git worktree for the base ref):
+Compare the working tree to `origin/main` with [benchstat](https://pkg.go.dev/golang.org/x/perf/cmd/benchstat). The script creates a detached git worktree for the base ref and overlays this tree's `bench_test.go` onto it, so new benches still measure main's library:
 
 ```bash
 make bench-compare

@@ -235,9 +235,7 @@ func forEachRawRecord(data []byte, fn func(rec []byte, startLine int) bool) {
 	startLine := 0
 	stopped := false
 	forEachLine(data, func(line []byte, lineNo int) bool {
-		if i := bytes.IndexByte(line, '#'); i != -1 {
-			line = line[:i]
-		}
+		line = stripComment(line)
 		if len(line) == 0 {
 			return true
 		}
@@ -266,6 +264,36 @@ func forEachRawRecord(data []byte, fn func(rec []byte, startLine int) bool) {
 	if !stopped && len(recBytes) > 0 {
 		fn(recBytes, startLine)
 	}
+}
+
+func stripComment(line []byte) []byte {
+	inQuote := false
+	escape := false
+	for i := 0; i < len(line); i++ {
+		c := line[i]
+		if inQuote {
+			if escape {
+				escape = false
+				continue
+			}
+			if c == '\\' {
+				escape = true
+				continue
+			}
+			if c == '"' {
+				inQuote = false
+			}
+			continue
+		}
+		if c == '"' {
+			inQuote = true
+			continue
+		}
+		if c == '#' {
+			return line[:i]
+		}
+	}
+	return line
 }
 
 func hasAttr(recBytes []byte, attr string) bool {
@@ -336,13 +364,7 @@ func parseTuple(p []byte) (Tuple, int, error) {
 		valueStart := end + 1
 		firstValue, _ := utf8.DecodeRune(p[valueStart:])
 		if firstValue == '"' {
-			length := bytes.IndexAny(p[valueStart+1:], "\"")
-			if length == -1 {
-				length = len(p) - valueStart
-			} else {
-				length += 2 // 1 for starting quote, and 1 for ending quote
-			}
-
+			length := quotedValueLen(p[valueStart:])
 			actualValue, err := strconv.Unquote(string(p[valueStart : valueStart+length]))
 			if err != nil {
 				return Tuple{}, valueStart + length, err
@@ -357,6 +379,25 @@ func parseTuple(p []byte) (Tuple, int, error) {
 			return Tuple{attr, string(p[valueStart : valueStart+length])}, valueStart + length, nil
 		}
 	}
+}
+
+func quotedValueLen(p []byte) int {
+	escape := false
+	for i := 1; i < len(p); i++ {
+		c := p[i]
+		if escape {
+			escape = false
+			continue
+		}
+		if c == '\\' {
+			escape = true
+			continue
+		}
+		if c == '"' {
+			return i + 1
+		}
+	}
+	return len(p)
 }
 
 func toSlice(it iter.Seq[Record]) []Record {

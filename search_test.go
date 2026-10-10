@@ -4,6 +4,20 @@ import (
 	"testing"
 )
 
+func TestSearchKeepsHashInsideQuotes(t *testing.T) {
+	db, err := ParseOne([]byte(`person name="foo#bar"`))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	records := db.SearchSlice(HasAttr("person"))
+	if len(records) != 1 {
+		t.Fatalf("expected 1 record, got %d", len(records))
+	}
+	if records[0].Get("name") != "foo#bar" {
+		t.Fatalf("expected name=foo#bar, got %s", records[0].Get("name"))
+	}
+}
+
 func TestSearchWithHasAttr(t *testing.T) {
 	m := &MemoryFileSystem{
 		Files: map[string]string{

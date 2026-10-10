@@ -603,9 +603,10 @@ func quotedContinuationInput(n int, closed bool) []byte {
 
 func TestContinuationJoinScaling(t *testing.T) {
 	const n = 100000
-	// Non-race is ~20ms here; -race is a few times slower. Quadratic join
-	// was 1.3s at 40k lines, so 500ms still fails the old path.
-	const bound = 500 * time.Millisecond
+	// Non-race is ~20ms here. CI runs -race -covermode=atomic (~1.5s).
+	// Quadratic join was 1.3s at 40k lines without race, so 5s still fails
+	// the old path even under the slower CI flags.
+	const bound = 5 * time.Second
 
 	closed := quotedContinuationInput(n, true)
 	start := time.Now()

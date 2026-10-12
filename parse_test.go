@@ -418,6 +418,35 @@ func TestParseQuotedValueSpanningThreeLines(t *testing.T) {
 	}
 }
 
+func TestParseKeepsHashInsideMultilineQuotedValue(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"hash mid continuation", "k=\"a\n\tfoo # bar\n\tc\"", "a foo # bar c"},
+		{"hash starts continuation", "k=\"a\n\t#b\n\tc\"", "a #b c"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			db, err := ParseOne([]byte(tc.in))
+			if err != nil {
+				t.Fatalf("ParseOne: %v", err)
+			}
+			recs := db.AllSlice()
+			if len(recs) != 1 {
+				t.Fatalf("expected 1 record, got %d (%v)", len(recs), recs)
+			}
+			if recs[0].Get("k") != tc.want {
+				t.Fatalf("k=%q want %q", recs[0].Get("k"), tc.want)
+			}
+			if got := db.SearchSlice(HasAttrValue("k", tc.want)); len(got) != 1 {
+				t.Fatalf("Search/HasAttrValue missed %q, got %d", tc.want, len(got))
+			}
+		})
+	}
+}
+
 func TestParseQuotedValueEscapedQuoteThenContinuation(t *testing.T) {
 	in := "k=\"abc\\\"\n\tmore\"\n"
 	db, err := ParseOne([]byte(in))

@@ -297,8 +297,9 @@ func forEachRecordLines(data []byte, fn func(lines [][]byte, startLine int) bool
 	var lines [][]byte
 	startLine := 0
 	stopped := false
+	inQuote := false
 	forEachLine(data, func(line []byte, lineNo int) bool {
-		line = stripComment(line)
+		line, inQuote = stripComment(line, inQuote)
 		if len(bytes.TrimSpace(line)) == 0 {
 			return true
 		}
@@ -341,30 +342,39 @@ func isASCIISpace(c byte) bool {
 
 // stripComment cuts an unquoted '#' comment through end of line, matching
 // parseTuple's quote rule: a quoted value starts only when '"' is the first
-// byte after '='. Quoted spans are measured with quotedValueLen so both
-// helpers share the same \" escape scan.
-func stripComment(line []byte) []byte {
-	if len(line) == 0 || bytes.IndexByte(line, '#') < 0 {
-		return line
+// byte after '='. inQuote is true when a previous continuation left a quoted
+// value open; the second return is that state after this line.
+func stripComment(line []byte, inQuote bool) ([]byte, bool) {
+	if len(line) == 0 {
+		return line, inQuote
 	}
 	i := 0
+	if inQuote {
+		n, closed := scanCloseQuote(line)
+		if !closed {
+			return line, true
+		}
+		i = n
+	} else if bytes.IndexByte(line, '#') < 0 && bytes.IndexByte(line, '"') < 0 {
+		return line, false
+	}
 	for i < len(line) {
 		for i < len(line) && isTupleSpace(line[i]) {
 			i++
 		}
 		if i >= len(line) {
-			return line
+			return line, false
 		}
 		if line[i] == '#' {
-			return line[:i]
+			return line[:i], false
 		}
 		end := indexByte6(line[i:], '=', '#', ' ', '\t', '\r', '\n')
 		if end == -1 {
-			return line
+			return line, false
 		}
 		i += end
 		if line[i] == '#' {
-			return line[:i]
+			return line[:i], false
 		}
 		if isTupleSpace(line[i]) {
 			continue
@@ -372,22 +382,26 @@ func stripComment(line []byte) []byte {
 		// '=' — only '"' immediately after it opens a quote, as in parseTuple.
 		i++
 		if i < len(line) && line[i] == '"' {
-			i += quotedValueLen(line[i:])
+			n, closed := scanCloseQuote(line[i+1:])
+			i += 1 + n
+			if !closed {
+				return line, true
+			}
 			continue
 		}
 		if i >= len(line) {
-			return line
+			return line, false
 		}
 		n := indexByte5(line[i:], '#', ' ', '\t', '\r', '\n')
 		if n == -1 {
-			return line
+			return line, false
 		}
 		if line[i+n] == '#' {
-			return line[:i+n]
+			return line[:i+n], false
 		}
 		i += n
 	}
-	return line
+	return line, false
 }
 
 func isTupleSpace(c byte) bool {
@@ -744,10 +758,19 @@ func indexByte6(p []byte, a, b, c, d, e, f byte) int {
 // quotedValueLen returns the length of a strconv-quoted value starting at p,
 // including both quotes. p[0] is the opening '"'. An escaped \" does not
 // close the quote; if the closer is missing the result is len(p).
-// stripComment uses this for the same escape rules.
 func quotedValueLen(p []byte) int {
+	if len(p) == 0 {
+		return 0
+	}
+	n, _ := scanCloseQuote(p[1:])
+	return 1 + n
+}
+
+// scanCloseQuote scans p as the inside of a quoted value. n includes the
+// closing '"' when closed; otherwise n is len(p).
+func scanCloseQuote(p []byte) (n int, closed bool) {
 	escape := false
-	for i := 1; i < len(p); i++ {
+	for i := 0; i < len(p); i++ {
 		c := p[i]
 		if escape {
 			escape = false
@@ -758,10 +781,10 @@ func quotedValueLen(p []byte) int {
 			continue
 		}
 		if c == '"' {
-			return i + 1
+			return i + 1, true
 		}
 	}
-	return len(p)
+	return len(p), false
 }
 
 func toSlice(it iter.Seq[Record]) []Record {

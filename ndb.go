@@ -504,7 +504,9 @@ func isASCIISpace(c byte) bool {
 // stripComment cuts an unquoted '#' comment through end of line, matching
 // parseTuple's quote rule: a quoted value starts only when '"' is the first
 // byte after '='. inQuote is true when a previous continuation left a quoted
-// value open; the second return is that state after this line.
+// value open; the second return is that state after this line. A '#' inside
+// a carried quote is kept when the rest of the line is valid UTF-8; invalid
+// bytes after '#' are stripped as a comment, as on main.
 func stripComment(line []byte, inQuote bool) ([]byte, bool) {
 	if len(line) == 0 {
 		return line, inQuote
@@ -513,6 +515,12 @@ func stripComment(line []byte, inQuote bool) ([]byte, bool) {
 	if inQuote {
 		n, closed := scanCloseQuote(line)
 		if !closed {
+			// Keep '#' inside the quote only when the rest is valid
+			// UTF-8. Invalid bytes after '#' are stripped as a comment,
+			// matching main, so existing files still load.
+			if i := bytes.IndexByte(line, '#'); i >= 0 && !utf8.Valid(line[i+1:]) {
+				return line[:i], true
+			}
 			return line, true
 		}
 		i = n

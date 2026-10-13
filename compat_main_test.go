@@ -309,10 +309,11 @@ func recordsSuperset(got, want []Record) bool {
 	return true
 }
 
-// intendedMultilineQuoteDiff reports the two cases this PR accepts that
-// main's per-line stripComment does not: a '#' inside a quote opened on
-// an earlier line, and a line that ends with an escaped quote so the
-// quote continues onto the next line.
+// intendedMultilineQuoteDiff reports the two value differences this PR
+// accepts against main's per-line stripComment: a valid-UTF-8 '#' inside
+// a quote opened on an earlier line, and a line that ends with an escaped
+// quote so the quote continues onto the next line. Invalid UTF-8 after
+// '#' is stripped like main and is not an intended diff.
 func intendedMultilineQuoteDiff(in []byte) bool {
 	inQuote := false
 	hashInCarriedQuote := false
@@ -324,9 +325,11 @@ func intendedMultilineQuoteDiff(in []byte) bool {
 		if isRecordStart(line) {
 			inQuote = false
 		}
-		if inQuote && bytes.IndexByte(line, '#') >= 0 {
-			hashInCarriedQuote = true
-			return false
+		if inQuote {
+			if i := bytes.IndexByte(line, '#'); i >= 0 && utf8.Valid(line[i+1:]) {
+				hashInCarriedQuote = true
+				return false
+			}
 		}
 		_, next := stripComment(line, inQuote)
 		if next && endsWithEscapedQuote(line) {
@@ -364,9 +367,6 @@ func compareAgainstMain(t *testing.T, in []byte) {
 		return
 	}
 	if err != nil {
-		if intendedMultilineQuoteDiff(in) {
-			return
-		}
 		t.Fatalf("ParseOne(%q) failed %v, main accepted", in, err)
 	}
 
@@ -447,6 +447,20 @@ func rawSearchTokens(in []byte) []string {
 	}
 	flush(len(in))
 	return out
+}
+
+func TestParseInvalidUTF8AfterHashInCarriedQuoteMatchesMain(t *testing.T) {
+	in := []byte("=\"\n #\xb2\n \"")
+	db, err := ParseOne(in)
+	if err != nil {
+		t.Fatalf("ParseOne: %v (main accepts this)", err)
+	}
+	want := mainAllSlice(in)
+	got := db.AllSlice()
+	if !recordsEqual(got, want) {
+		t.Fatalf("got %v\nwant %v (main)", got, want)
+	}
+	compareAgainstMain(t, in)
 }
 
 func TestCompatVsMainSeeded(t *testing.T) {

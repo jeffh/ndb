@@ -70,6 +70,7 @@ make
 
 - **`FileSystem` interface**: Abstraction for file I/O
   - `LocalFileSystem`: Real filesystem implementation
+  - `MmapFileSystem`: Memory-maps local files; the `Ndb` owns the mappings (`Close`, or a GC cleanup) and copies record strings out of them
   - `MemoryFileSystem`: In-memory implementation for testing
 
 ### Search and Query API

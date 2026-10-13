@@ -67,6 +67,10 @@ db, err := ndb.Open(&ndb.LocalFileSystem{}, "database.ndb")
 // Open single file (no recursion)
 db, err := ndb.OpenOne(&ndb.LocalFileSystem{}, "database.ndb")
 
+// Memory-map files instead of reading them into the heap (see below)
+db, err := ndb.Open(&ndb.MmapFileSystem{}, "database.ndb")
+defer db.Close()
+
 // Parse in-memory data
 db, err := ndb.ParseOneString("ip=192.168.1.1 sys=server01\n")
 ```
@@ -179,6 +183,39 @@ go test ./...
 # Run with race detection
 go test -race ./...
 ```
+
+## Memory-mapped files (MmapFileSystem)
+
+`MmapFileSystem` maps database files read-only instead of reading them into
+the Go heap. The OS pages data in as `Search` scans it and can evict those
+pages under memory pressure, so a large database costs page cache, not heap.
+It works on Linux, macOS and the BSDs and falls back to reading elsewhere.
+
+- Call `Close` to release the mappings early. Otherwise they are released
+  when the `*Ndb` is garbage collected. After `Close` the database is empty.
+- Records copy their strings out of the mapping, so they stay valid after
+  `Close`. Each record is copied into one string, not one per field.
+- Don't truncate a mapped file while it is open; that can crash the process
+  with `SIGBUS`. Replace files by renaming a new one into place.
+
+Measured on an Intel Xeon @ 2.10GHz (benchstat n=6 unless noted):
+
+| | `LocalFileSystem` | `MmapFileSystem` |
+| --- | --- | --- |
+| `OpenOne`, 8 MiB, heap allocated | 16.3 MiB | 1 KiB |
+| `OpenOne`, 128 MiB, heap allocated (n=3) | 268.5 MiB | 0 MiB |
+| `OpenOne`, 8 MiB, warm / cold cache | 29.4 / 34.1 ms | 24.9 / 28.8 ms |
+| `OpenOne`, 128 MiB, warm (n=3) | 591–951 ms | 383–434 ms |
+| Selective `Search` (`HasAttrMiss`, `HasAttrValue`) | — | no slower |
+| Full iteration (`IterateAllRecords`, dense `HasAttr`) | — | 16–37% slower |
+
+Full iteration pays for copying each yielded record out of the mapping (one
+allocation per record). Use `MmapFileSystem` for large databases that are
+mostly searched selectively, or when heap size matters more than iteration
+throughput. `BenchmarkOpenOne{,Cold}` compare opening directly;
+`NDB_BENCH_FS=mmap` reruns the Search/Iterate benchmarks on a mapped
+database. `BenchmarkOpenOneCold` evicts the file with `POSIX_FADV_DONTNEED`
+before each open (Linux amd64/arm64 only).
 
 ## SIMD search (GOEXPERIMENT=simd)
 

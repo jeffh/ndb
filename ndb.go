@@ -397,7 +397,7 @@ func isRecordStartLine(data []byte) bool {
 	if n := len(line); n > 0 && line[n-1] == '\r' {
 		line = line[:n-1]
 	}
-	line = stripComment(line)
+	line, _ = stripComment(line, false)
 	return len(bytes.TrimSpace(line)) > 0 && isRecordStart(line)
 }
 
@@ -448,6 +448,9 @@ func forEachRecordLines(data []byte, fn func(lines [][]byte, startLine int) bool
 	stopped := false
 	inQuote := false
 	forEachLine(data, func(line []byte, lineNo int) bool {
+		if isRecordStart(line) {
+			inQuote = false
+		}
 		line, inQuote = stripComment(line, inQuote)
 		if len(bytes.TrimSpace(line)) == 0 {
 			return true

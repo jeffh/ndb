@@ -309,6 +309,43 @@ func recordsSuperset(got, want []Record) bool {
 	return true
 }
 
+// intendedMultilineQuoteDiff reports the two cases this PR accepts that
+// main's per-line stripComment does not: a '#' inside a quote opened on
+// an earlier line, and a line that ends with an escaped quote so the
+// quote continues onto the next line.
+func intendedMultilineQuoteDiff(in []byte) bool {
+	inQuote := false
+	hashInCarriedQuote := false
+	escapedQuoteContinues := false
+	forEachLine(in, func(line []byte, _ int) bool {
+		if isRecordStart(line) {
+			inQuote = false
+		}
+		if inQuote && bytes.IndexByte(line, '#') >= 0 {
+			hashInCarriedQuote = true
+			return false
+		}
+		_, next := stripComment(line, inQuote)
+		if next && endsWithEscapedQuote(line) {
+			escapedQuoteContinues = true
+		}
+		inQuote = next
+		return true
+	})
+	return hashInCarriedQuote || escapedQuoteContinues
+}
+
+func endsWithEscapedQuote(line []byte) bool {
+	if len(line) < 2 || line[len(line)-1] != '"' {
+		return false
+	}
+	n := 0
+	for i := len(line) - 2; i >= 0 && line[i] == '\\'; i-- {
+		n++
+	}
+	return n%2 == 1
+}
+
 func compareAgainstMain(t *testing.T, in []byte) {
 	t.Helper()
 	mainErr := mainValidate(in)
@@ -316,6 +353,9 @@ func compareAgainstMain(t *testing.T, in []byte) {
 
 	if mainErr != nil {
 		if err == nil {
+			if intendedMultilineQuoteDiff(in) {
+				return
+			}
 			t.Fatalf("ParseOne(%q) succeeded, main rejected: %v", in, mainErr)
 		}
 		return
@@ -327,6 +367,9 @@ func compareAgainstMain(t *testing.T, in []byte) {
 	wantRecs := mainAllSlice(in)
 	gotRecs := got.AllSlice()
 	if !recordsEqual(gotRecs, wantRecs) {
+		if intendedMultilineQuoteDiff(in) {
+			return
+		}
 		t.Fatalf("AllSlice mismatch for %q\n got %v\nwant %v", in, gotRecs, wantRecs)
 	}
 
@@ -427,6 +470,10 @@ func TestCompatVsMainSeeded(t *testing.T) {
 		"k=\"x a=\"\n\tfoo\"\n",
 		"k=\"hello a=\"\n\tmore\"\n",
 		"prefix k=\"unclosed a=\"\n\tmore\"\n",
+		"=\"\n #\"",
+		"k=\"a\n\tfoo # bar\n\tc\"",
+		"k=\"a\n\t#b\n\tc\"",
+		"k=\"abc\\\"\n\t#more\"\n",
 	}
 	for i, s := range seeds {
 		t.Run(fmt.Sprintf("seed%d", i), func(t *testing.T) {
@@ -456,6 +503,10 @@ func FuzzParseCompat(f *testing.F) {
 		"k=\"x a=\"\n\tfoo\"\n",
 		"k=\"hello a=\"\n\tmore\"\n",
 		"prefix k=\"unclosed a=\"\n\tmore\"\n",
+		"=\"\n #\"",
+		"k=\"a\n\tfoo # bar\n\tc\"",
+		"k=\"a\n\t#b\n\tc\"",
+		"k=\"abc\\\"\n\t#more\"\n",
 	} {
 		f.Add(s)
 	}

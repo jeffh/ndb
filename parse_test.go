@@ -418,6 +418,37 @@ func TestParseQuotedValueSpanningThreeLines(t *testing.T) {
 	}
 }
 
+func TestParseDoesNotCarryOpenQuoteIntoNextRecord(t *testing.T) {
+	// A column-0 line is a new record or a comment, not a quote
+	// continuation. Resetting inQuote there keeps a later record's
+	// '#' as a comment instead of quote data, and lets an indented
+	// closer after a column-0 comment still finish the first record.
+	in := "k=\"open\n# not-in-quote\n\tclose\"\nnext=1 # comment\n"
+	db, err := ParseOne([]byte(in))
+	if err != nil {
+		t.Fatalf("ParseOne: %v", err)
+	}
+	recs := db.AllSlice()
+	if len(recs) != 2 {
+		t.Fatalf("got %d records %v, want 2", len(recs), recs)
+	}
+	if recs[0].Get("k") != "open close" {
+		t.Fatalf("k=%q want %q", recs[0].Get("k"), "open close")
+	}
+	if recs[1].Get("next") != "1" {
+		t.Fatalf("next=%q want 1 (comment must be stripped)", recs[1].Get("next"))
+	}
+	if recs[1].HasKey("comment") || recs[1].HasKey("#") {
+		t.Fatalf("comment leaked into next record: %v", recs[1])
+	}
+	if got := db.SearchSlice(HasAttrValue("next", "1")); len(got) != 1 {
+		t.Fatalf("Search missed next=1, got %d", len(got))
+	}
+	if got := db.SearchSlice(HasAttrValue("k", "open close")); len(got) != 1 {
+		t.Fatalf("Search missed k=%q, got %d", "open close", len(got))
+	}
+}
+
 func TestParseKeepsHashInsideMultilineQuotedValue(t *testing.T) {
 	cases := []struct {
 		name string

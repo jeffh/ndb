@@ -209,6 +209,22 @@ Intel Xeon @ 2.10GHz, 4 vCPU):
 | `IterateAllRecords` | 23.4 ms | ~ | 21.5 ms (−8%) |
 | `IterateRecordsAndKeys` | 24.3 ms | ~ | 22.2 ms (−9%) |
 
+On arm64 (GitHub `ubuntu-24.04-arm` runner, 8 MiB fixture, `benchstat`
+n=6, default build vs `GOEXPERIMENT=simd`), the NEON candidate scan gives:
+
+| Benchmark | default build | `GOEXPERIMENT=simd` |
+| --- | --- | --- |
+| `SearchHasAttrMiss` | 3.07 ms | 0.44 ms (−86%) |
+| `SearchHasAttrValue` | 819 µs | 571 µs (−30%) |
+| `SearchHasAttr` (every record matches) | 23.8 ms | 24.5 ms (+3%) |
+| `IterateAllRecords` | 20.3 ms | 21.1 ms (+4%) |
+
+The parser's token scanners stay scalar on arm64: a NEON version was
+12–17% slower there because tokens are short. The remaining +3–4% on
+iteration does not come from the NEON code, which `All()` never calls.
+The hot functions compile to the same instructions in both builds, so it
+comes from code placement changing under the experiment.
+
 ## Benchmarks
 
 Regression benches cover the public search and iteration APIs:

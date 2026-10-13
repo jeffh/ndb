@@ -60,6 +60,7 @@ func skipGatedSize(b *testing.B, sz benchSize) {
 
 type benchDB struct {
 	db   *Ndb
+	path string
 	size int64
 	recs int
 }
@@ -68,6 +69,16 @@ var (
 	fixtureMu    sync.Mutex
 	fixtureCache = map[int]benchDB{}
 )
+
+// benchFS is the FileSystem the Search/Iterate benches open fixtures with.
+// NDB_BENCH_FS=mmap runs them against MmapFileSystem so the same benchmark
+// names can be compared with benchstat.
+func benchFS() FileSystem {
+	if os.Getenv("NDB_BENCH_FS") == "mmap" {
+		return &MmapFileSystem{}
+	}
+	return &LocalFileSystem{}
+}
 
 // cachedBenchDB writes each size once and reuses the opened *Ndb. Go reruns
 // the whole benchmark function during calibration; without a cache that
@@ -91,11 +102,11 @@ func cachedBenchDB(b *testing.B, sz benchSize) benchDB {
 	if err != nil {
 		b.Fatal(err)
 	}
-	db, err := OpenOne(&LocalFileSystem{}, path)
+	db, err := OpenOne(benchFS(), path)
 	if err != nil {
 		b.Fatal(err)
 	}
-	env := benchDB{db: db, size: st.size, recs: st.records}
+	env := benchDB{db: db, path: path, size: st.size, recs: st.records}
 	fixtureCache[sz.target] = env
 	return env
 }
@@ -403,6 +414,59 @@ func BenchmarkIterateRecordsAndKeys(b *testing.B) {
 		benchSink = bytes
 		return n
 	}, func(env benchDB) int { return env.recs })
+}
+
+// BenchmarkOpenOne measures OpenOne+Close with a warm page cache: reading
+// the file into the heap (local) versus mapping it (mmap). Both validate
+// every record, so both touch every page.
+func BenchmarkOpenOne(b *testing.B) {
+	benchOpenOne(b, false)
+}
+
+// BenchmarkOpenOneCold is BenchmarkOpenOne with the fixture evicted from the
+// page cache before every open (Linux only), so each open pages the file in
+// from storage: read(2) for local, page faults for mmap.
+func BenchmarkOpenOneCold(b *testing.B) {
+	benchOpenOne(b, true)
+}
+
+func benchOpenOne(b *testing.B, cold bool) {
+	for _, fs := range []struct {
+		name string
+		sys  FileSystem
+	}{{"local", &LocalFileSystem{}}, {"mmap", &MmapFileSystem{}}} {
+		b.Run(fs.name, func(b *testing.B) {
+			for _, sz := range allBenchSizes() {
+				b.Run(sz.name, func(b *testing.B) {
+					env := cachedBenchDB(b, sz)
+					if cold {
+						if err := dropPageCache(env.path); err != nil {
+							b.Skip("cannot evict page cache: ", err)
+						}
+					}
+					b.SetBytes(env.size)
+					b.ReportAllocs()
+					b.ResetTimer()
+					for i := 0; i < b.N; i++ {
+						if cold {
+							b.StopTimer()
+							if err := dropPageCache(env.path); err != nil {
+								b.Fatal(err)
+							}
+							b.StartTimer()
+						}
+						db, err := OpenOne(fs.sys, env.path)
+						if err != nil {
+							b.Fatal(err)
+						}
+						if err := db.Close(); err != nil {
+							b.Fatal(err)
+						}
+					}
+				})
+			}
+		})
+	}
 }
 
 func TestBenchFixturePublicAPI(t *testing.T) {

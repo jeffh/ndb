@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"io"
 	"iter"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"unicode"
 	"unicode/utf8"
 	"unsafe"
@@ -20,8 +22,59 @@ type Ndb struct {
 	// copyStrings forces Attr/Val to be copied out of file buffers. ParseOne
 	// sets this so callers who mutate the input after Open still see stable
 	// records they already held. Open/OpenOne own their ReadAll buffers, so
-	// unquoted strings may alias that immutable data.
+	// unquoted strings may alias that immutable data. Memory-mapped files
+	// also set it, since a mapping can be unmapped while strings are held.
 	copyStrings bool
+
+	// maps holds memory mappings from MmapFileSystem. cleanup releases them
+	// if the Ndb becomes unreachable without Close.
+	maps    *mappings
+	cleanup runtime.Cleanup
+}
+
+type mappings struct {
+	mu    sync.Mutex
+	files []*mappedFile
+}
+
+func (m *mappings) close() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var first error
+	for _, f := range m.files {
+		if err := f.Close(); err != nil && first == nil {
+			first = err
+		}
+	}
+	m.files = nil
+	return first
+}
+
+// Close releases the memory mappings of a database opened through
+// MmapFileSystem. Records already returned stay valid. After Close the
+// database is empty: Search and All yield nothing. Close must not run
+// concurrently with an iteration over the same database. Closing a database
+// that holds no mappings just empties it.
+func (n *Ndb) Close() error {
+	n.data = nil
+	if n.maps == nil {
+		return nil
+	}
+	n.cleanup.Stop()
+	err := n.maps.close()
+	n.maps = nil
+	return err
+}
+
+func (n *Ndb) addMapping(m *mappedFile) {
+	if n.maps == nil {
+		n.maps = &mappings{}
+		n.cleanup = runtime.AddCleanup(n, func(m *mappings) { _ = m.close() }, n.maps)
+	}
+	n.maps.mu.Lock()
+	n.maps.files = append(n.maps.files, m)
+	n.maps.mu.Unlock()
+	n.copyStrings = true
 }
 
 // Open opens a new Ndb database from the given file path. It will recursively resolve any
@@ -36,7 +89,9 @@ type Ndb struct {
 //
 // Attribute and value strings from Search/All may alias the in-memory file
 // buffer. They stay valid after iteration, but keeping those strings alive
-// also keeps the whole file buffer alive.
+// also keeps the whole file buffer alive. With MmapFileSystem the files are
+// memory-mapped instead and strings are copied out; see MmapFileSystem and
+// Close.
 func Open(sys FileSystem, filepath string) (*Ndb, error) {
 	if sys == nil {
 		panic("sys is required")
@@ -50,6 +105,7 @@ func Open(sys FileSystem, filepath string) (*Ndb, error) {
 	for {
 		n, err := db.readFiles(count)
 		if err != nil {
+			_ = db.Close()
 			return nil, err
 		}
 		if n == 0 {
@@ -77,7 +133,9 @@ func Open(sys FileSystem, filepath string) (*Ndb, error) {
 //
 // Attribute and value strings from Search/All may alias the in-memory file
 // buffer. They stay valid after iteration, but keeping those strings alive
-// also keeps the whole file buffer alive.
+// also keeps the whole file buffer alive. With MmapFileSystem the files are
+// memory-mapped instead and strings are copied out; see MmapFileSystem and
+// Close.
 func OpenOne(sys FileSystem, filepath string) (*Ndb, error) {
 	if sys == nil {
 		panic("sys is required")
@@ -88,6 +146,7 @@ func OpenOne(sys FileSystem, filepath string) (*Ndb, error) {
 		sys:   sys,
 	}
 	if _, err := db.readFiles(0); err != nil {
+		_ = db.Close()
 		return nil, err
 	}
 	return db, nil
@@ -130,6 +189,11 @@ func (n *Ndb) readFile(fileToRead string) ([]byte, error) {
 	f, err := n.sys.Open(fileToRead)
 	if err != nil {
 		return nil, err
+	}
+	if m, ok := f.(*mappedFile); ok {
+		// Keep the mapping for the life of the Ndb instead of copying it.
+		n.addMapping(m)
+		return m.data, nil
 	}
 	buf, err := io.ReadAll(f)
 	_ = f.Close()

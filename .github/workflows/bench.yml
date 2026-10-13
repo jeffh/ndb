@@ -35,9 +35,14 @@ concurrency:
 
 jobs:
   bench:
-    name: Benchmark
-    runs-on: ubuntu-latest
+    name: Benchmark (${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        # amd64 exercises the AVX2 scanners, arm64 the NEON ones.
+        runner: [ubuntu-latest, ubuntu-24.04-arm]
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -56,19 +61,34 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p tmp/bench
-          {
+          header() {
             echo "# go=$(go env GOVERSION) $(go env GOOS)/$(go env GOARCH)"
             echo "# cpu=$(uname -p 2>/dev/null || true) $(nproc) cores"
             echo "# mem=$(awk '/MemTotal/ {print $2, $3}' /proc/meminfo)"
             lscpu | awk -F: '/Model name/ {gsub(/^[ \t]+/, "", $2); print "# model="$2; exit}'
-            go test -run '^$' -bench . -benchmem -count="$BENCH_COUNT" -benchtime="$BENCH_TIME"
-          } | tee tmp/bench/bench.txt
+          }
+          header > tmp/bench/bench.txt
+          header > tmp/bench/bench-simd.txt
+          # Alternate default and GOEXPERIMENT=simd (archsimd scanners
+          # compiled in) one count at a time so runner drift hits both.
+          for _ in $(seq "$BENCH_COUNT"); do
+            go test -run '^$' -bench . -benchmem -count=1 -benchtime="$BENCH_TIME" \
+              | tee -a tmp/bench/bench.txt
+            GOEXPERIMENT=simd go test -run '^$' -bench . -benchmem -count=1 -benchtime="$BENCH_TIME" \
+              | tee -a tmp/bench/bench-simd.txt
+          done
+
+      - name: Compare default vs GOEXPERIMENT=simd
+        run: |
+          set -euo pipefail
+          go run golang.org/x/perf/cmd/benchstat@v0.0.0-20250807204132-c4b8702907f0 \
+            default=tmp/bench/bench.txt simd=tmp/bench/bench-simd.txt | tee tmp/bench/benchstat.txt
 
       - name: Publish summary
         if: always()
         run: |
           {
-            echo "## Benchmark results"
+            echo "## Benchmark results (${{ matrix.runner }})"
             echo
             echo "This check is informational. It does not fail on performance noise."
             echo
@@ -83,12 +103,32 @@ jobs:
               echo "(no bench output)"
             fi
             echo '```'
+            echo
+            echo "### benchstat: default vs GOEXPERIMENT=simd"
+            echo
+            echo '```'
+            if [[ -f tmp/bench/benchstat.txt ]]; then
+              cat tmp/bench/benchstat.txt
+            else
+              echo "(no benchstat output)"
+            fi
+            echo '```'
+            echo
+            echo "### GOEXPERIMENT=simd"
+            echo
+            echo '```'
+            if [[ -f tmp/bench/bench-simd.txt ]]; then
+              cat tmp/bench/bench-simd.txt
+            else
+              echo "(no bench output)"
+            fi
+            echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload bench.txt
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: bench-results
-          path: tmp/bench/bench.txt
+          name: bench-results-${{ matrix.runner }}
+          path: tmp/bench/bench*.txt
           if-no-files-found: warn

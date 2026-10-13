@@ -625,7 +625,7 @@ func hasAttrValKeys(recBytes, attrEq, attrSp []byte, value string) bool {
 			return len(value) == 0 && bytes.Contains(recBytes, attrSp)
 		}
 		off += idx + 1
-		tup, n, err := parseTuple(recBytes[off:], false)
+		tup, n, err := parseTuple(recBytes[off:], aliasInput)
 		if err == nil && tup.Val == value {
 			return true
 		}
@@ -664,7 +664,7 @@ func hasAttrValLines(lines [][]byte, attrEq, attrSp []byte, value string) bool {
 				from = idx + 1
 				continue
 			}
-			tup, n, err := parseTuple(p, false)
+			tup, n, err := parseTuple(p, aliasInput)
 			if err == nil && tup.Val == value {
 				return true
 			}
@@ -802,7 +802,7 @@ func isTupleStart(line []byte, idx int) bool {
 		if off > idx {
 			return false
 		}
-		_, n, err := parseTuple(p, false)
+		_, n, err := parseTuple(p, aliasInput)
 		if n <= 0 {
 			return false
 		}
@@ -839,7 +839,7 @@ func parseJoined(p []byte, results *Record) error {
 		if len(p) == 0 {
 			return nil
 		}
-		tup, n, err := parseTuple(p, true)
+		tup, n, err := parseTuple(p, copyEach)
 		if err != nil {
 			return err
 		}
@@ -855,6 +855,10 @@ func parseJoined(p []byte, results *Record) error {
 func parseRecordLines(lines [][]byte, results *Record, copyStr bool) error {
 	if *results == nil {
 		*results = make(Record, 0, 10)
+	}
+	src := aliasInput
+	if copyStr {
+		src = recordArena(lines)
 	}
 	for i, line := range lines {
 		if !utf8.Valid(line) {
@@ -875,7 +879,7 @@ func parseRecordLines(lines [][]byte, results *Record, copyStr bool) error {
 			}
 			var tup Tuple
 			var n int
-			tup, n, err = parseTuple(p, copyStr)
+			tup, n, err = parseTuple(p, src)
 			if err != nil {
 				if i+1 < len(lines) {
 					return parseJoined(joinRest(p, lines[i+1:]), results)
@@ -889,12 +893,12 @@ func parseRecordLines(lines [][]byte, results *Record, copyStr bool) error {
 	return nil
 }
 
-func parseTuple(p []byte, copyStr bool) (Tuple, int, error) {
+func parseTuple(p []byte, src stringSource) (Tuple, int, error) {
 	end := indexByte5(p, '=', ' ', '\t', '\r', '\n')
 	if end == -1 {
-		return Tuple{cloneString(p, copyStr), ""}, len(p), nil
+		return Tuple{src.str(p), ""}, len(p), nil
 	}
-	attr := cloneString(p[:end], copyStr)
+	attr := src.str(p[:end])
 	if p[end] != '=' {
 		return Tuple{attr, ""}, end, nil
 	}
@@ -903,9 +907,10 @@ func parseTuple(p []byte, copyStr bool) (Tuple, int, error) {
 		length := quotedValueLen(p[valueStart:])
 		q := p[valueStart : valueStart+length]
 		if length >= 2 && q[length-1] == '"' && bytes.IndexByte(q, '\\') < 0 {
-			return Tuple{attr, cloneString(q[1:length-1], copyStr)}, valueStart + length, nil
+			return Tuple{attr, src.str(q[1 : length-1])}, valueStart + length, nil
 		}
-		actualValue, err := strconv.Unquote(cloneString(q, false))
+		// Unquote allocates its result: q holds a backslash or is malformed.
+		actualValue, err := strconv.Unquote(aliasInput.str(q))
 		if err != nil {
 			return Tuple{}, valueStart + length, err
 		}
@@ -915,17 +920,49 @@ func parseTuple(p []byte, copyStr bool) (Tuple, int, error) {
 	if length == -1 {
 		length = len(p) - valueStart
 	}
-	return Tuple{attr, cloneString(p[valueStart:valueStart+length], copyStr)}, valueStart + length, nil
+	return Tuple{attr, src.str(p[valueStart : valueStart+length])}, valueStart + length, nil
 }
 
-func cloneString(b []byte, copyStr bool) string {
+// stringSource says how parseTuple turns input bytes into strings: alias
+// them, copy each one, or slice them from arena, a copy of the input range
+// starting at base.
+type stringSource struct {
+	copy  bool
+	arena string
+	base  uintptr
+}
+
+var (
+	aliasInput = stringSource{}
+	copyEach   = stringSource{copy: true}
+)
+
+// recordArena copies a record's whole line span into one string, so every
+// attribute and value can be sliced from it: one allocation per record
+// instead of one per string. lines must come from forEachRecordLines, i.e.
+// be ordered subslices of one buffer.
+func recordArena(lines [][]byte) stringSource {
+	first, last := lines[0], lines[len(lines)-1]
+	start := unsafe.Pointer(unsafe.SliceData(first))
+	n := int(uintptr(unsafe.Pointer(unsafe.SliceData(last)))-uintptr(start)) + len(last)
+	return stringSource{
+		copy:  true,
+		arena: string(unsafe.Slice((*byte)(start), n)),
+		base:  uintptr(start),
+	}
+}
+
+func (s stringSource) str(b []byte) string {
 	if len(b) == 0 {
 		return ""
 	}
-	if copyStr {
-		return string(b)
+	if !s.copy {
+		return unsafe.String(unsafe.SliceData(b), len(b))
 	}
-	return unsafe.String(unsafe.SliceData(b), len(b))
+	if off := uintptr(unsafe.Pointer(unsafe.SliceData(b))) - s.base; off < uintptr(len(s.arena)) && uintptr(len(b)) <= uintptr(len(s.arena))-off {
+		return s.arena[off : off+uintptr(len(b))]
+	}
+	return string(b)
 }
 
 // quotedValueLen returns the length of a strconv-quoted value starting at p,

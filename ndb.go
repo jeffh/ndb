@@ -116,7 +116,8 @@ func validateRecords(data []byte) error {
 	var firstErr error
 	forEachRecordLines(data, func(lines [][]byte, startLine int) bool {
 		rec.zero()
-		if err := parseRecordLines(lines, &rec, true); err != nil {
+		// rec is discarded after each record, so strings may alias data.
+		if err := parseRecordLines(lines, &rec, false); err != nil {
 			firstErr = fmt.Errorf("line %d: %w", startLine, err)
 			return false
 		}

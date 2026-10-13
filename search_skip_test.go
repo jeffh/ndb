@@ -44,7 +44,7 @@ func TestSearchSkipFindsEscapedValue(t *testing.T) {
 // most 22 bytes ("x-long-attribute-name").
 func TestSearchSkipLongNeedleAtOffsets(t *testing.T) {
 	const needle = "abcdefghijklmnopqrstuvwxyz012345" // 32 bytes
-	const decoy = "aXXXXXXXXXXXXXXXXXXXXXXXXXXXXX5"   // same first/last, different middle
+	decoy := "a" + strings.Repeat("X", 30) + "5"      // same first/last, different middle
 	if len(needle) != 32 || len(decoy) != 32 {
 		t.Fatalf("need 32-byte strings, got needle=%d decoy=%d", len(needle), len(decoy))
 	}

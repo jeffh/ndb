@@ -38,6 +38,27 @@ jobs:
         flags: unittests
         name: codecov-umbrella
 
+  test-arm64:
+    name: Test (arm64)
+    runs-on: ubuntu-24.04-arm
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version-file: go.mod
+        cache: true
+
+    - name: Run tests
+      run: go test -race ./...
+
+    - name: Run tests (GOEXPERIMENT=simd, NEON scanners)
+      env:
+        GOEXPERIMENT: simd
+      run: go test -race ./...
+
   build:
     name: Build
     runs-on: ubuntu-latest

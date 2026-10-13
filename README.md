@@ -186,16 +186,17 @@ go test -race ./...
 (whichever is longer) and only splits and tests records that contain it, so
 selective searches skip most of the file. Every build does this. With Go's
 experimental SIMD support enabled, that scan and the parser's token scanners
-use `simd/archsimd` (AVX2) on amd64:
+use `simd/archsimd`: AVX2 on amd64 and NEON on arm64:
 
 ```bash
 GOEXPERIMENT=simd go build ./...
 GOEXPERIMENT=simd go test ./...
 ```
 
-Without the experiment, or on CPUs without AVX2, the same code paths fall
-back to `bytes.Index` and scalar loops. Results are identical either way; CI
-runs the tests in both modes.
+Without the experiment, on other architectures, or on amd64 CPUs without
+AVX2, the same code paths fall back to `bytes.Index` and scalar loops.
+Results are identical either way; CI runs the tests in both modes on amd64
+and arm64.
 
 Speedup vs. the previous release, 8 MiB fixture (`benchstat`, n=8,
 Intel Xeon @ 2.10GHz, 4 vCPU):

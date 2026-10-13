@@ -2,10 +2,11 @@ package ndb
 
 import "bytes"
 
-// Portable scanners. scan_simd_amd64.go replaces the exported-to-package
-// entry points (indexByte4/5/6, indexCandidate) with archsimd versions when
-// built with GOEXPERIMENT=simd on amd64; scan_generic.go forwards to these
-// otherwise. The SIMD versions also fall back here on CPUs without AVX2.
+// Portable scanners. scan_simd_amd64.go (AVX2) and scan_simd_arm64.go (NEON)
+// replace the package entry points (indexByte4/5/6, indexCandidate) with
+// archsimd versions when built with GOEXPERIMENT=simd; scan_generic.go
+// forwards to these otherwise. The amd64 versions also fall back here on
+// CPUs without AVX2.
 
 func indexByte4Scalar(p []byte, a, b, c, d byte) int {
 	for i, x := range p {

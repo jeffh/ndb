@@ -29,12 +29,12 @@ jobs:
     - name: Run tests (GOEXPERIMENT=simd)
       env:
         GOEXPERIMENT: simd
-      run: go test -race ./...
+      run: go test -race -coverprofile=coverage-simd.txt -covermode=atomic ./...
 
     - name: Upload coverage to Codecov
       uses: codecov/codecov-action@v4
       with:
-        files: ./coverage.txt
+        files: ./coverage.txt,./coverage-simd.txt
         flags: unittests
         name: codecov-umbrella
 

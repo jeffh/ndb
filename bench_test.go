@@ -356,9 +356,7 @@ func BenchmarkSearchHasAttrMiss(b *testing.B) {
 	}, func(benchDB) int { return 0 })
 }
 
-// BenchmarkSearchHasAttrValue finds one known sys= value with HasAttrValue
-// (still a full file scan; Search does not stop after the first hit unless
-// the caller breaks).
+// BenchmarkSearchHasAttrValue finds one known sys= value with HasAttrValue.
 func BenchmarkSearchHasAttrValue(b *testing.B) {
 	pred := HasAttrValue("sys", benchTargetSys)
 	runSized(b, func(db *Ndb) int {

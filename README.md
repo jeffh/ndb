@@ -185,8 +185,9 @@ go test -race ./...
 `Search` scans the raw file text for the predicate's attribute name or value
 (whichever is longer) and only splits and tests records that contain it, so
 selective searches skip most of the file. Every build does this. With Go's
-experimental SIMD support enabled, that scan and the parser's token scanners
-use `simd/archsimd`: AVX2 on amd64 and NEON on arm64:
+experimental SIMD support enabled, that candidate scan uses `simd/archsimd`
+(AVX2 on amd64, NEON on arm64). The parser's token scanners also use AVX2
+on amd64; on arm64 they stay scalar:
 
 ```bash
 GOEXPERIMENT=simd go build ./...

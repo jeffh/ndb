@@ -39,6 +39,22 @@ func TestSearchSkipFindsEscapedValue(t *testing.T) {
 	}
 }
 
+// The backslash that marks an escaped value can sit anywhere in a vector
+// block; slide the record across every offset of a 64-byte window.
+func TestSearchSkipFindsEscapedValueAtEveryOffset(t *testing.T) {
+	for pad := range 64 {
+		in := "pad=" + strings.Repeat("a", pad) + "\n" +
+			`sys="\x62ench-target" ip=1` + "\n" +
+			strings.Repeat("filler=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n", 4)
+		db, err := ParseOneString(in)
+		must(t, err)
+		got := db.SearchSlice(HasAttrValue("sys", "bench-target"))
+		if len(got) != 1 || got[0].Get("ip") != "1" {
+			t.Fatalf("pad=%d: HasAttrValue(sys, bench-target) = %v", pad, got)
+		}
+	}
+}
+
 func TestSearchSkipHitOnContinuationLine(t *testing.T) {
 	in := "a=1\n" +
 		"# sys=comment-only, not part of any tuple\n" +

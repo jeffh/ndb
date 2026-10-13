@@ -418,6 +418,86 @@ func TestParseQuotedValueSpanningThreeLines(t *testing.T) {
 	}
 }
 
+func TestParseDoesNotCarryOpenQuoteIntoNextRecord(t *testing.T) {
+	// A new unindented record resets inQuote. The later record's '#'
+	// is a comment, not quote data. A column-0 comment between the
+	// open quote and its closer is skipped and does not start a record.
+	in := "k=\"open\n# not-in-quote\n\tclose\"\nnext=1 # comment\n"
+	db, err := ParseOne([]byte(in))
+	if err != nil {
+		t.Fatalf("ParseOne: %v", err)
+	}
+	recs := db.AllSlice()
+	if len(recs) != 2 {
+		t.Fatalf("got %d records %v, want 2", len(recs), recs)
+	}
+	if recs[0].Get("k") != "open close" {
+		t.Fatalf("k=%q want %q", recs[0].Get("k"), "open close")
+	}
+	if recs[1].Get("next") != "1" {
+		t.Fatalf("next=%q want 1 (comment must be stripped)", recs[1].Get("next"))
+	}
+	if recs[1].HasKey("comment") || recs[1].HasKey("#") {
+		t.Fatalf("comment leaked into next record: %v", recs[1])
+	}
+	if got := db.SearchSlice(HasAttrValue("next", "1")); len(got) != 1 {
+		t.Fatalf("Search missed next=1, got %d", len(got))
+	}
+	if got := db.SearchSlice(HasAttrValue("k", "open close")); len(got) != 1 {
+		t.Fatalf("Search missed k=%q, got %d", "open close", len(got))
+	}
+}
+
+func TestParseKeepsIndentedHashAfterCommentInsideMultilineQuote(t *testing.T) {
+	// A column-0 comment in the middle of an open quote must not
+	// reset inQuote, or the following indented '#' is stripped.
+	in := "k=\"open\n# comment in the middle\n\t#data\n\tclose\""
+	want := "open #data close"
+	db, err := ParseOne([]byte(in))
+	if err != nil {
+		t.Fatalf("ParseOne: %v", err)
+	}
+	recs := db.AllSlice()
+	if len(recs) != 1 {
+		t.Fatalf("expected 1 record, got %d (%v)", len(recs), recs)
+	}
+	if recs[0].Get("k") != want {
+		t.Fatalf("k=%q want %q", recs[0].Get("k"), want)
+	}
+	if got := db.SearchSlice(HasAttrValue("k", want)); len(got) != 1 {
+		t.Fatalf("Search/HasAttrValue missed %q, got %d", want, len(got))
+	}
+}
+
+func TestParseKeepsHashInsideMultilineQuotedValue(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"hash mid continuation", "k=\"a\n\tfoo # bar\n\tc\"", "a foo # bar c"},
+		{"hash starts continuation", "k=\"a\n\t#b\n\tc\"", "a #b c"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			db, err := ParseOne([]byte(tc.in))
+			if err != nil {
+				t.Fatalf("ParseOne: %v", err)
+			}
+			recs := db.AllSlice()
+			if len(recs) != 1 {
+				t.Fatalf("expected 1 record, got %d (%v)", len(recs), recs)
+			}
+			if recs[0].Get("k") != tc.want {
+				t.Fatalf("k=%q want %q", recs[0].Get("k"), tc.want)
+			}
+			if got := db.SearchSlice(HasAttrValue("k", tc.want)); len(got) != 1 {
+				t.Fatalf("Search/HasAttrValue missed %q, got %d", tc.want, len(got))
+			}
+		})
+	}
+}
+
 func TestParseQuotedValueEscapedQuoteThenContinuation(t *testing.T) {
 	in := "k=\"abc\\\"\n\tmore\"\n"
 	db, err := ParseOne([]byte(in))
@@ -509,7 +589,8 @@ func TestStripComment(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := string(stripComment([]byte(tc.in)))
+			out, _ := stripComment([]byte(tc.in), false)
+			got := string(out)
 			if got != tc.want {
 				t.Fatalf("stripComment(%q) = %q, want %q", tc.in, got, tc.want)
 			}

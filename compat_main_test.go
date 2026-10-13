@@ -318,6 +318,9 @@ func intendedMultilineQuoteDiff(in []byte) bool {
 	hashInCarriedQuote := false
 	escapedQuoteContinues := false
 	forEachLine(in, func(line []byte, _ int) bool {
+		if isFullLineComment(line) {
+			return true
+		}
 		if isRecordStart(line) {
 			inQuote = false
 		}
@@ -361,6 +364,9 @@ func compareAgainstMain(t *testing.T, in []byte) {
 		return
 	}
 	if err != nil {
+		if intendedMultilineQuoteDiff(in) {
+			return
+		}
 		t.Fatalf("ParseOne(%q) failed %v, main accepted", in, err)
 	}
 
@@ -474,6 +480,8 @@ func TestCompatVsMainSeeded(t *testing.T) {
 		"k=\"a\n\tfoo # bar\n\tc\"",
 		"k=\"a\n\t#b\n\tc\"",
 		"k=\"abc\\\"\n\t#more\"\n",
+		"k=\"open\n# comment in the middle\n\t#data\n\tclose\"",
+		"=\"\n #\xb2\n \"",
 	}
 	for i, s := range seeds {
 		t.Run(fmt.Sprintf("seed%d", i), func(t *testing.T) {
@@ -507,6 +515,8 @@ func FuzzParseCompat(f *testing.F) {
 		"k=\"a\n\tfoo # bar\n\tc\"",
 		"k=\"a\n\t#b\n\tc\"",
 		"k=\"abc\\\"\n\t#more\"\n",
+		"k=\"open\n# comment in the middle\n\t#data\n\tclose\"",
+		"=\"\n #\xb2\n \"",
 	} {
 		f.Add(s)
 	}

@@ -448,6 +448,9 @@ func forEachRecordLines(data []byte, fn func(lines [][]byte, startLine int) bool
 	stopped := false
 	inQuote := false
 	forEachLine(data, func(line []byte, lineNo int) bool {
+		if isFullLineComment(line) {
+			return true
+		}
 		if isRecordStart(line) {
 			inQuote = false
 		}
@@ -486,6 +489,12 @@ func isRecordStart(line []byte) bool {
 	}
 	first, _ := utf8.DecodeRune(line)
 	return !unicode.IsSpace(first)
+}
+
+// isFullLineComment reports a column-0 '#' comment. These are skipped
+// and must not reset inQuote or start a record.
+func isFullLineComment(line []byte) bool {
+	return len(line) > 0 && line[0] == '#'
 }
 
 func isASCIISpace(c byte) bool {

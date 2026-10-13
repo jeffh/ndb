@@ -180,6 +180,51 @@ go test ./...
 go test -race ./...
 ```
 
+## SIMD search (GOEXPERIMENT=simd)
+
+`Search` scans the raw file text for the predicate's attribute name or value
+(whichever is longer) and only splits and tests records that contain it, so
+selective searches skip most of the file. Every build does this. With Go's
+experimental SIMD support enabled, that scan and the parser's token scanners
+use `simd/archsimd`: AVX2 on amd64 and NEON on arm64:
+
+```bash
+GOEXPERIMENT=simd go build ./...
+GOEXPERIMENT=simd go test ./...
+```
+
+Without the experiment, on other architectures, or on amd64 CPUs without
+AVX2, the same code paths fall back to `bytes.Index` and scalar loops.
+Results are identical either way; CI runs the tests in both modes on amd64
+and arm64.
+
+Speedup vs. the previous release, 8 MiB fixture (`benchstat`, n=8,
+Intel Xeon @ 2.10GHz, 4 vCPU):
+
+| Benchmark | before | default build | `GOEXPERIMENT=simd` |
+| --- | --- | --- | --- |
+| `SearchHasAttrMiss` | 17.1 ms | 2.82 ms (−84%) | 0.47 ms (−97%) |
+| `SearchHasAttrValue` | 13.4 ms | 1.10 ms (−92%) | 0.59 ms (−96%) |
+| `SearchHasAttr` (every record matches) | 24.4 ms | 25.7 ms (+5%, noisy) | 23.2 ms (~) |
+| `IterateAllRecords` | 23.4 ms | ~ | 21.5 ms (−8%) |
+| `IterateRecordsAndKeys` | 24.3 ms | ~ | 22.2 ms (−9%) |
+
+On arm64 (GitHub `ubuntu-24.04-arm` runner, 8 MiB fixture, `benchstat`
+n=6, default build vs `GOEXPERIMENT=simd`), the NEON candidate scan gives:
+
+| Benchmark | default build | `GOEXPERIMENT=simd` |
+| --- | --- | --- |
+| `SearchHasAttrMiss` | 3.07 ms | 0.44 ms (−86%) |
+| `SearchHasAttrValue` | 819 µs | 571 µs (−30%) |
+| `SearchHasAttr` (every record matches) | 23.8 ms | 24.5 ms (+3%) |
+| `IterateAllRecords` | 20.3 ms | 21.1 ms (+4%) |
+
+The parser's token scanners stay scalar on arm64: a NEON version was
+12–17% slower there because tokens are short. The remaining +3–4% on
+iteration does not come from the NEON code, which `All()` never calls.
+The hot functions compile to the same instructions in both builds, so it
+comes from code placement changing under the experiment.
+
 ## Benchmarks
 
 Regression benches cover the public search and iteration APIs:
@@ -187,7 +232,7 @@ Regression benches cover the public search and iteration APIs:
 | Benchmark | Public API | What it measures |
 | --- | --- | --- |
 | `BenchmarkSearchHasAttr` | `Search(HasAttr("sys"))` + `Get` | key-present search over every record |
-| `BenchmarkSearchHasAttrMiss` | `Search(HasAttr("no-such-attr"))` | key scan with no matches (no record parse) |
+| `BenchmarkSearchHasAttrMiss` | `Search(HasAttr("no-such-attr"))` | key scan with no matches (raw-text skip; no record is split or parsed) |
 | `BenchmarkSearchHasAttrValue` | `Search(HasAttrValue("sys", "bench-target"))` | key=value search for one known hit |
 | `BenchmarkIterateAllRecords` | `All()` | iterate every record |
 | `BenchmarkIterateRecordsAndKeys` | `All()` + `Len`/`KeyAt`/`ValueAt` | iterate every record and every key |

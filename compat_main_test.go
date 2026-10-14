@@ -309,6 +309,49 @@ func recordsSuperset(got, want []Record) bool {
 	return true
 }
 
+// intendedMultilineQuoteDiff reports the two value differences this PR
+// accepts against main's per-line stripComment: a valid-UTF-8 '#' inside
+// a quote opened on an earlier line, and a line that ends with an escaped
+// quote so the quote continues onto the next line. Invalid UTF-8 after
+// '#' is stripped like main and is not an intended diff.
+func intendedMultilineQuoteDiff(in []byte) bool {
+	inQuote := false
+	hashInCarriedQuote := false
+	escapedQuoteContinues := false
+	forEachLine(in, func(line []byte, _ int) bool {
+		if isFullLineComment(line) {
+			return true
+		}
+		if isRecordStart(line) {
+			inQuote = false
+		}
+		if inQuote {
+			if i := bytes.IndexByte(line, '#'); i >= 0 && utf8.Valid(line[i+1:]) {
+				hashInCarriedQuote = true
+				return false
+			}
+		}
+		_, next := stripComment(line, inQuote)
+		if next && endsWithEscapedQuote(line) {
+			escapedQuoteContinues = true
+		}
+		inQuote = next
+		return true
+	})
+	return hashInCarriedQuote || escapedQuoteContinues
+}
+
+func endsWithEscapedQuote(line []byte) bool {
+	if len(line) < 2 || line[len(line)-1] != '"' {
+		return false
+	}
+	n := 0
+	for i := len(line) - 2; i >= 0 && line[i] == '\\'; i-- {
+		n++
+	}
+	return n%2 == 1
+}
+
 func compareAgainstMain(t *testing.T, in []byte) {
 	t.Helper()
 	mainErr := mainValidate(in)
@@ -316,6 +359,9 @@ func compareAgainstMain(t *testing.T, in []byte) {
 
 	if mainErr != nil {
 		if err == nil {
+			if intendedMultilineQuoteDiff(in) {
+				return
+			}
 			t.Fatalf("ParseOne(%q) succeeded, main rejected: %v", in, mainErr)
 		}
 		return
@@ -327,6 +373,9 @@ func compareAgainstMain(t *testing.T, in []byte) {
 	wantRecs := mainAllSlice(in)
 	gotRecs := got.AllSlice()
 	if !recordsEqual(gotRecs, wantRecs) {
+		if intendedMultilineQuoteDiff(in) {
+			return
+		}
 		t.Fatalf("AllSlice mismatch for %q\n got %v\nwant %v", in, gotRecs, wantRecs)
 	}
 
@@ -400,6 +449,20 @@ func rawSearchTokens(in []byte) []string {
 	return out
 }
 
+func TestParseInvalidUTF8AfterHashInCarriedQuoteMatchesMain(t *testing.T) {
+	in := []byte("=\"\n #\xb2\n \"")
+	db, err := ParseOne(in)
+	if err != nil {
+		t.Fatalf("ParseOne: %v (main accepts this)", err)
+	}
+	want := mainAllSlice(in)
+	got := db.AllSlice()
+	if !recordsEqual(got, want) {
+		t.Fatalf("got %v\nwant %v (main)", got, want)
+	}
+	compareAgainstMain(t, in)
+}
+
 func TestCompatVsMainSeeded(t *testing.T) {
 	seeds := []string{
 		`k="a` + "\n\tb\n\tc\"\n",
@@ -427,6 +490,12 @@ func TestCompatVsMainSeeded(t *testing.T) {
 		"k=\"x a=\"\n\tfoo\"\n",
 		"k=\"hello a=\"\n\tmore\"\n",
 		"prefix k=\"unclosed a=\"\n\tmore\"\n",
+		"=\"\n #\"",
+		"k=\"a\n\tfoo # bar\n\tc\"",
+		"k=\"a\n\t#b\n\tc\"",
+		"k=\"abc\\\"\n\t#more\"\n",
+		"k=\"open\n# comment in the middle\n\t#data\n\tclose\"",
+		"=\"\n #\xb2\n \"",
 	}
 	for i, s := range seeds {
 		t.Run(fmt.Sprintf("seed%d", i), func(t *testing.T) {
@@ -456,6 +525,12 @@ func FuzzParseCompat(f *testing.F) {
 		"k=\"x a=\"\n\tfoo\"\n",
 		"k=\"hello a=\"\n\tmore\"\n",
 		"prefix k=\"unclosed a=\"\n\tmore\"\n",
+		"=\"\n #\"",
+		"k=\"a\n\tfoo # bar\n\tc\"",
+		"k=\"a\n\t#b\n\tc\"",
+		"k=\"abc\\\"\n\t#more\"\n",
+		"k=\"open\n# comment in the middle\n\t#data\n\tclose\"",
+		"=\"\n #\xb2\n \"",
 	} {
 		f.Add(s)
 	}

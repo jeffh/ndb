@@ -744,3 +744,42 @@ func TestContinuationJoinIsLinear(t *testing.T) {
 		t.Fatalf("doubling %d→%d: %s → %s (≈4x or worse; want closer to 2x)", n, 2*n, t1, t2)
 	}
 }
+
+func hashFallbackContinuationInput(n int) []byte {
+	var b strings.Builder
+	b.Grow(4 + n*16)
+	b.WriteString(`a="`)
+	for i := 0; i < n; i++ {
+		b.WriteString("\n\t# see C:\\path")
+	}
+	b.WriteString("\n\t\"")
+	return []byte(b.String())
+}
+
+func TestHashInQuoteFallbackIsLinear(t *testing.T) {
+	timeN := func(n int) time.Duration {
+		in := hashFallbackContinuationInput(n)
+		best := time.Duration(1 << 62)
+		for i := 0; i < 3; i++ {
+			start := time.Now()
+			db, err := ParseOne(in)
+			if err != nil {
+				t.Fatalf("ParseOne n=%d: %v", n, err)
+			}
+			for range db.All() {
+			}
+			if d := time.Since(start); d < best {
+				best = d
+			}
+		}
+		return best
+	}
+
+	const n = 80000
+	t1 := timeN(n)
+	t2 := timeN(2 * n)
+	t.Logf("n=%d %s; 2n=%d %s (ratio %.2f)", n, t1, 2*n, t2, float64(t2)/float64(t1))
+	if t2 >= 4*t1 {
+		t.Fatalf("doubling %d→%d: %s → %s (≈4x or worse; want closer to 2x)", n, 2*n, t1, t2)
+	}
+}

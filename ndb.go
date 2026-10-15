@@ -442,28 +442,53 @@ func forEachLine(data []byte, fn func(line []byte, lineNo int) bool) {
 // forEachRecordLines yields each record as comment-stripped, trimmed lines
 // that still point into data. The lines slice is reused; callers must finish
 // with a record before returning.
+//
+// A '#' inside a carried quote is kept only when it is a plain '#'
+// (valid UTF-8, no '"' after it) and the joined record still parses.
+// Otherwise the record is re-stripped with main's per-line rule.
 func forEachRecordLines(data []byte, fn func(lines [][]byte, startLine int) bool) {
 	var lines [][]byte
+	var raw [][]byte
 	startLine := 0
 	stopped := false
 	inQuote := false
+	maybeFallback := false
+	flush := func() bool {
+		if maybeFallback {
+			lines = fallbackKeptHashIfUnparseable(raw, lines)
+		}
+		if !fn(lines, startLine) {
+			stopped = true
+			return false
+		}
+		lines = lines[:0]
+		raw = raw[:0]
+		maybeFallback = false
+		return true
+	}
 	forEachLine(data, func(line []byte, lineNo int) bool {
-		if isFullLineComment(line) {
+		orig := line
+		if isFullLineComment(orig) {
 			return true
 		}
-		if isRecordStart(line) {
+		if isRecordStart(orig) {
 			inQuote = false
 		}
-		line, inQuote = stripComment(line, inQuote)
+		wasInQuote := inQuote
+		line, inQuote = stripComment(orig, inQuote)
+		if wasInQuote && bytes.IndexByte(orig, '#') >= 0 {
+			maybeFallback = true
+		}
 		if len(bytes.TrimSpace(line)) == 0 {
+			if len(lines) > 0 {
+				raw = append(raw, orig)
+			}
 			return true
 		}
 		if isRecordStart(line) && len(lines) > 0 {
-			if !fn(lines, startLine) {
-				stopped = true
+			if !flush() {
 				return false
 			}
-			lines = lines[:0]
 		}
 		line = bytes.TrimSpace(line)
 		if len(line) == 0 {
@@ -472,12 +497,117 @@ func forEachRecordLines(data []byte, fn func(lines [][]byte, startLine int) bool
 		if len(lines) == 0 {
 			startLine = lineNo
 		}
+		raw = append(raw, orig)
 		lines = append(lines, line)
 		return true
 	})
 	if !stopped && len(lines) > 0 {
-		fn(lines, startLine)
+		flush()
 	}
+}
+
+// fallbackKeptHashIfUnparseable keeps '#'-as-data lines only for #21's
+// intended case: a plain '#' inside a carried quote whose joined record
+// still parses. Any other '#' on a line that started in a carried quote
+// is re-stripped with main's per-line rule so 4052a04's result is kept.
+func fallbackKeptHashIfUnparseable(raw, lines [][]byte) [][]byte {
+	if plainHashInCarriedQuote(raw) {
+		var rec Record
+		if parseRecordLines(lines, &rec, false) == nil {
+			return lines
+		}
+	}
+	out := lines[:0]
+	for _, line := range raw {
+		line, _ = stripComment(line, false)
+		line = bytes.TrimSpace(line)
+		if len(line) > 0 {
+			out = append(out, line)
+		}
+	}
+	return out
+}
+
+// plainHashInCarriedQuote reports a '#' inside a quote opened on an
+// earlier line, where the text after '#' is valid UTF-8 and has no '"'.
+func plainHashInCarriedQuote(raw [][]byte) bool {
+	inQuote := false
+	for _, line := range raw {
+		if isRecordStart(line) {
+			inQuote = false
+		}
+		if inQuote {
+			n, closed := scanCloseQuote(line)
+			end := len(line)
+			if closed {
+				end = n
+			}
+			if i := bytes.IndexByte(line[:end], '#'); i >= 0 {
+				rest := line[i+1:]
+				if utf8.Valid(rest) && bytes.IndexByte(rest, '"') < 0 {
+					return true
+				}
+			}
+		}
+		inQuote = quoteOpenAfterLine(line, inQuote)
+	}
+	return false
+}
+
+// quoteOpenAfterLine reports whether a quoted value is still open after
+// line, using parseTuple's =" opening rule and scanCloseQuote. It does
+// not keep or strip '#'; a '#' outside a quote ends the scan.
+func quoteOpenAfterLine(line []byte, inQuote bool) bool {
+	i := 0
+	if inQuote {
+		n, closed := scanCloseQuote(line)
+		if !closed {
+			return true
+		}
+		i = n
+	} else if bytes.IndexByte(line, '"') < 0 {
+		return false
+	}
+	for i < len(line) {
+		for i < len(line) && isTupleSpace(line[i]) {
+			i++
+		}
+		if i >= len(line) || line[i] == '#' {
+			return false
+		}
+		end := indexByte6(line[i:], '=', '#', ' ', '\t', '\r', '\n')
+		if end == -1 {
+			return false
+		}
+		i += end
+		if line[i] == '#' {
+			return false
+		}
+		if isTupleSpace(line[i]) {
+			continue
+		}
+		i++
+		if i < len(line) && line[i] == '"' {
+			n, closed := scanCloseQuote(line[i+1:])
+			i += 1 + n
+			if !closed {
+				return true
+			}
+			continue
+		}
+		if i >= len(line) {
+			return false
+		}
+		n := indexByte5(line[i:], '#', ' ', '\t', '\r', '\n')
+		if n == -1 {
+			return false
+		}
+		if line[i+n] == '#' {
+			return false
+		}
+		i += n
+	}
+	return false
 }
 
 func isRecordStart(line []byte) bool {
@@ -504,9 +634,14 @@ func isASCIISpace(c byte) bool {
 // stripComment cuts an unquoted '#' comment through end of line, matching
 // parseTuple's quote rule: a quoted value starts only when '"' is the first
 // byte after '='. inQuote is true when a previous continuation left a quoted
-// value open; the second return is that state after this line. A '#' inside
-// a carried quote is kept when the rest of the line is valid UTF-8; invalid
-// bytes after '#' are stripped as a comment, as on main.
+// value open; the second return is that state after this line.
+//
+// A '#' inside a carried quote is kept only when the rest of the line is
+// valid UTF-8 and contains no '"'. A '"' after '#' is either the closer
+// or a quote inside what main treated as a comment; keeping it would
+// reject or silently retokenize files 4052a04 accepted. Invalid bytes
+// after '#' are stripped as a comment, as on main. Kept '#' text that
+// still fails to parse is re-stripped in forEachRecordLines.
 func stripComment(line []byte, inQuote bool) ([]byte, bool) {
 	if len(line) == 0 {
 		return line, inQuote
@@ -514,13 +649,17 @@ func stripComment(line []byte, inQuote bool) ([]byte, bool) {
 	i := 0
 	if inQuote {
 		n, closed := scanCloseQuote(line)
-		if !closed {
-			// Keep '#' inside the quote only when the rest is valid
-			// UTF-8. Invalid bytes after '#' are stripped as a comment,
-			// matching main, so existing files still load.
-			if i := bytes.IndexByte(line, '#'); i >= 0 && !utf8.Valid(line[i+1:]) {
+		span := line
+		if closed {
+			span = line[:n]
+		}
+		if i := bytes.IndexByte(span, '#'); i >= 0 {
+			rest := line[i+1:]
+			if !utf8.Valid(rest) || bytes.IndexByte(rest, '"') >= 0 {
 				return line[:i], true
 			}
+		}
+		if !closed {
 			return line, true
 		}
 		i = n

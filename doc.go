@@ -1,4 +1,4 @@
-// ndb provides methods to reading Plan 9 Network Database (ndb) files.
+// ndb provides methods for reading Plan 9 Network Database (ndb) files.
 //
 // ndb files are a simple key-value storage mechanism that can be used to
 // specify configuration information. The format also supports including other

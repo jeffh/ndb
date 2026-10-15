@@ -19,6 +19,10 @@ go test -run TestName
 # Run tests with race detection
 go test -race ./...
 
+# Same tests with experimental SIMD scanners (CI runs this too)
+GOEXPERIMENT=simd go test ./...
+GOEXPERIMENT=simd go test -race ./...
+
 # Run benchmarks
 go test -bench . -benchtime 5s -benchmem -cpuprofile=cpu.out -memprofile=mem.out -trace=trace.out
 ```
@@ -93,6 +97,8 @@ db.Search(HasAttr("person"), HasAttrValue("name", "John"))
 - `HasAttr(attr)`: Match records containing attribute
 - `HasAttrValue(attr, val)`: Match records where attribute equals value
 
+`Search` raw-scans the file for the predicate's attribute or value (whichever is longer) and only splits and tests records that contain it. With `GOEXPERIMENT=simd`, that scan uses AVX2 (`scan_simd_amd64.go`) or NEON (`scan_simd_arm64.go`); otherwise it uses `bytes.Index` (`scan.go` / `scan_generic.go`). On arm64 the parser's token scanners stay scalar.
+
 ### File Format Details
 
 - Records start with non-whitespace characters
@@ -105,7 +111,7 @@ db.Search(HasAttr("person"), HasAttrValue("name", "John"))
 
 ### Key Implementation Details
 
-1. **Parsing Strategy**: The library parses on-demand during iteration rather than loading all records upfront. This is memory-efficient for large databases.
+1. **Parsing Strategy**: Records are parsed on demand during iteration, not loaded all at once. `Search` skips records whose raw text cannot match, so most of a selective query is never split or parsed.
 
 2. **Record Reuse**: The `Search()` iterator reuses a single `Record` slice internally. Callers must copy records if they need to retain them beyond the iteration.
 

@@ -39,6 +39,29 @@ func TestSearchSkipFindsEscapedValue(t *testing.T) {
 	}
 }
 
+// Needles of 32+ bytes take the AVX2/NEON first/last-byte path and walk
+// the middle bytes in the verify loop. Existing tests use needles of at
+// most 22 bytes ("x-long-attribute-name").
+func TestSearchSkipLongNeedleAtOffsets(t *testing.T) {
+	const needle = "abcdefghijklmnopqrstuvwxyz012345" // 32 bytes
+	decoy := "a" + strings.Repeat("X", 30) + "5"      // same first/last, different middle
+	if len(needle) != 32 || len(decoy) != 32 {
+		t.Fatalf("need 32-byte strings, got needle=%d decoy=%d", len(needle), len(decoy))
+	}
+	for _, pad := range []int{0, 1, 16, 31, 32, 33} {
+		in := "pad=" + strings.Repeat("a", pad) + "\n" +
+			"sys=" + decoy + " ip=0\n" +
+			"sys=" + needle + " ip=1\n" +
+			strings.Repeat("filler=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n", 4)
+		db, err := ParseOneString(in)
+		must(t, err)
+		got := db.SearchSlice(HasAttrValue("sys", needle))
+		if len(got) != 1 || got[0].Get("ip") != "1" {
+			t.Fatalf("pad=%d: HasAttrValue(sys, 32-byte needle) = %v", pad, got)
+		}
+	}
+}
+
 // The backslash that marks an escaped value can sit anywhere in a vector
 // block; slide the record across every offset of a 64-byte window.
 func TestSearchSkipFindsEscapedValueAtEveryOffset(t *testing.T) {
